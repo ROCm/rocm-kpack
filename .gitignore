@@ -3,6 +3,7 @@ __pycache__
 
 # Build directories
 build/
+build-*/
 *.o
 *.so
 *.a
