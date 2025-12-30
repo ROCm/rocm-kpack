@@ -1240,6 +1240,10 @@ def set_pointer(
                     file=sys.stderr,
                 )
                 print(
+                    f"  File: {input_path}",
+                    file=sys.stderr,
+                )
+                print(
                     f"  PIE binaries require R_X86_64_RELATIVE relocations for pointers to work correctly",
                     file=sys.stderr,
                 )

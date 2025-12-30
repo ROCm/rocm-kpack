@@ -110,6 +110,15 @@ def is_fat_binary(file_path: Path, toolchain: Toolchain) -> bool:
         RuntimeError: If readelf fails (corrupted file, readelf crash, etc.)
         FileNotFoundError: If file doesn't exist
     """
+    # Fast check: Is file empty?
+    try:
+        if file_path.stat().st_size == 0:
+            return False  # Empty file, definitely not a fat binary
+    except FileNotFoundError:
+        raise
+    except OSError as e:
+        raise RuntimeError(f"Cannot stat file {file_path}: {e}") from e
+
     # Fast check: Is this even an ELF file?
     try:
         with open(file_path, "rb") as f:

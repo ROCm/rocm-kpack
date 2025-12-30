@@ -743,7 +743,7 @@ def kpack_offload_binary(
             )
 
             if not success:
-                raise RuntimeError("Zero-page optimization failed")
+                raise RuntimeError(f"Zero-page optimization failed for {input_path}")
         else:
             # No .hip_fatbin section, just copy the file
             if verbose:
@@ -763,12 +763,14 @@ def kpack_offload_binary(
         )
 
         if not success:
-            raise RuntimeError("Failed to map .rocm_kpack_ref section")
+            raise RuntimeError(f"Failed to map .rocm_kpack_ref section in {input_path}")
 
         # Phase 3: Find mapped address of .rocm_kpack_ref
         kpack_ref_vaddr = get_section_vaddr(toolchain, temp_mapped, ".rocm_kpack_ref")
         if kpack_ref_vaddr is None:
-            raise RuntimeError(".rocm_kpack_ref section not found after mapping")
+            raise RuntimeError(
+                f".rocm_kpack_ref section not found after mapping in {input_path}"
+            )
 
         # Phases 3-5 only apply to binaries with .hip_fatbin
         if has_fatbin:
@@ -781,7 +783,9 @@ def kpack_offload_binary(
                 toolchain, temp_mapped, ".hipFatBinSegment"
             )
             if hipfatbin_segment_vaddr is None:
-                raise RuntimeError(".hipFatBinSegment section not found")
+                raise RuntimeError(
+                    f".hipFatBinSegment section not found in {input_path}"
+                )
 
             # Pointer is at offset +8 in __CudaFatBinaryWrapper structure
             pointer_vaddr = hipfatbin_segment_vaddr + 8
@@ -797,7 +801,7 @@ def kpack_offload_binary(
             )
 
             if not success:
-                raise RuntimeError("Failed to set pointer")
+                raise RuntimeError(f"Failed to set pointer in {input_path}")
 
             # Phase 5: Rewrite magic HIPF→HIPK
             if verbose:

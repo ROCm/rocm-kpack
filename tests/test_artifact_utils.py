@@ -183,7 +183,75 @@ class TestScanDirectory:
 
 
 class TestIsFatBinary:
-    """Tests for fat binary detection."""
+    """Tests for fat binary detection.
+
+    These tests verify that is_fat_binary() correctly identifies:
+    - Fat binaries (ELF files with .hip_fatbin section) -> True
+    - Host-only binaries (ELF files without .hip_fatbin) -> False
+    - Non-ELF files -> False
+    - Empty files -> False
+    - Missing files -> raises FileNotFoundError
+    """
+
+    def test_is_fat_binary_empty_file(self, tmp_path, toolchain):
+        """Test that empty files are correctly identified as not fat binaries.
+
+        Empty files can occur in CI/build artifacts due to:
+        - Incomplete downloads
+        - Build failures that leave empty placeholder files
+        - Test artifacts that weren't properly generated
+        """
+        empty_file = tmp_path / "empty.so"
+        empty_file.write_bytes(b"")  # Create empty file
+
+        # Should return False immediately without calling readelf
+        result = is_fat_binary(empty_file, toolchain)
+        assert result is False
+
+    def test_is_fat_binary_missing_file(self, tmp_path, toolchain):
+        """Test that missing files raise FileNotFoundError."""
+        missing_file = tmp_path / "nonexistent.so"
+
+        with pytest.raises(FileNotFoundError):
+            is_fat_binary(missing_file, toolchain)
+
+    def test_is_fat_binary_host_only_exe(self, test_assets_dir, toolchain):
+        """Test that host-only ELF executables (no .hip_fatbin) return False.
+
+        Uses the pre-generated host_only.exe from test_assets which is a
+        valid ELF executable without any GPU device code.
+        """
+        host_only = test_assets_dir / "bundled_binaries/linux/cov5/host_only.exe"
+        assert host_only.exists(), f"Test asset not found: {host_only}"
+
+        result = is_fat_binary(host_only, toolchain)
+        assert result is False
+
+    def test_is_fat_binary_host_only_so(self, test_assets_dir, toolchain):
+        """Test that host-only shared libraries (no .hip_fatbin) return False.
+
+        Uses the pre-generated libhost_only.so from test_assets which is a
+        valid ELF shared library without any GPU device code.
+        """
+        host_only = test_assets_dir / "bundled_binaries/linux/cov5/libhost_only.so"
+        assert host_only.exists(), f"Test asset not found: {host_only}"
+
+        result = is_fat_binary(host_only, toolchain)
+        assert result is False
+
+    def test_is_fat_binary_with_hip_fatbin_real(self, test_assets_dir, toolchain):
+        """Test that fat binaries (with .hip_fatbin) return True.
+
+        Uses the pre-generated test_kernel_single.exe from test_assets which
+        is a valid ELF executable with GPU device code.
+        """
+        fat_binary = (
+            test_assets_dir / "bundled_binaries/linux/cov5/test_kernel_single.exe"
+        )
+        assert fat_binary.exists(), f"Test asset not found: {fat_binary}"
+
+        result = is_fat_binary(fat_binary, toolchain)
+        assert result is True
 
     def test_is_fat_binary_with_hip_fatbin(self, tmp_path):
         """Test detecting a binary with .hip_fatbin section."""
