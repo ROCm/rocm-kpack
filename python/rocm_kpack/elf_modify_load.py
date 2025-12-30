@@ -6,6 +6,7 @@ This tool provides zero-page optimization and PT_LOAD segment mapping for ELF bi
 Designed for kpack runtime integration.
 """
 
+import shutil
 import struct
 import sys
 from pathlib import Path
@@ -442,15 +443,17 @@ def conservative_zero_page(
     )
 
     if aligned_size == 0:
-        print(
-            "\nWARNING: Section too small or misaligned - no full pages to zero",
-            file=sys.stderr,
-        )
-        print(
-            f"  Section range: [0x{section_vaddr:x}, 0x{section_vaddr + section_size:x})",
-            file=sys.stderr,
-        )
-        return False
+        # Section is too small (< 4KB) or misaligned such that no full pages
+        # can be zero-paged. This is OK for small binaries with minimal GPU code.
+        # Just copy the file unchanged and return success.
+        if verbose:
+            print(f"\n  Section too small or misaligned - no full pages to zero")
+            print(
+                f"  Section range: [0x{section_vaddr:x}, 0x{section_vaddr + section_size:x})"
+            )
+            print(f"  Copying file unchanged (no optimization possible)")
+        shutil.copy2(input_path, output_path)
+        return True
 
     aligned_offset = section_offset + (aligned_vaddr - section_vaddr)
     section_end_vaddr = section_vaddr + section_size

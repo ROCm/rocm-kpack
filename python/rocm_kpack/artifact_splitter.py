@@ -574,21 +574,28 @@ class ArtifactSplitter:
                         verbose=self.verbose,
                     )
 
-                    # Validate stripping succeeded
+                    # Validate output was created
                     if not binary_path.exists():
                         raise RuntimeError(
                             f"Binary disappeared after stripping: {binary_path}"
                         )
 
                     new_size = binary_path.stat().st_size
-                    if new_size >= original_size:
-                        raise RuntimeError(
-                            f"Binary was not stripped or grew in size: {binary_path}\n"
-                            f"Original: {original_size} bytes, New: {new_size} bytes"
-                        )
-
+                    # Note: Size may grow for small .hip_fatbin sections where
+                    # structural overhead (padding, PHDR relocation) exceeds
+                    # zero-page savings. This is acceptable for small binaries.
                     if self.verbose:
-                        print(f"    Device code stripped, new size: {new_size} bytes")
+                        size_delta = new_size - original_size
+                        if size_delta < 0:
+                            print(
+                                f"    Device code stripped, new size: {new_size} bytes "
+                                f"(saved {-size_delta} bytes)"
+                            )
+                        else:
+                            print(
+                                f"    Processed, new size: {new_size} bytes "
+                                f"(+{size_delta} bytes overhead)"
+                            )
 
                 finally:
                     # Always clean up temp file
