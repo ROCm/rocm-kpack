@@ -765,11 +765,11 @@ class ArtifactSplitter:
             )
 
         # Phase 7: Write artifact manifest for generic artifact with all prefixes
-        if processed_prefixes:
-            generic_artifact_dir = output_dir / f"{self.artifact_prefix}_generic"
-            if not generic_artifact_dir.exists():
-                generic_artifact_dir.mkdir(parents=True, exist_ok=True)
-            write_artifact_manifest(generic_artifact_dir, processed_prefixes)
+        # Always write manifest, even if empty (ensures downstream tools find it)
+        generic_artifact_dir = output_dir / f"{self.artifact_prefix}_generic"
+        if not generic_artifact_dir.exists():
+            generic_artifact_dir.mkdir(parents=True, exist_ok=True)
+        write_artifact_manifest(generic_artifact_dir, processed_prefixes)
 
         if self.verbose:
             print(f"\nSplitting complete. Output in: {output_dir}")
