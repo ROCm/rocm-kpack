@@ -975,14 +975,20 @@ def find_and_update_relocation(
     verbose: bool = False,
 ) -> bool:
     """
-    Find and update R_X86_64_RELATIVE relocation at given virtual address.
+    Find and update relocation at given virtual address, converting to R_X86_64_RELATIVE.
+
+    This function finds any relocation targeting the specified virtual address and
+    converts it to R_X86_64_RELATIVE with the new addend. This is used when completely
+    replacing pointer semantics (e.g., redirecting from fat binary to kpack metadata),
+    where the original relocation type is irrelevant.
 
     Args:
         data: ELF binary data
         ehdr: ELF header
         vaddr: Virtual address of the location being relocated
-        new_addend: New addend value to set
-        old_addend: Optional expected old addend for validation (None = skip check)
+        new_addend: New addend value (target virtual address for R_X86_64_RELATIVE)
+        old_addend: Optional expected old addend for validation (only checked for
+                    existing R_X86_64_RELATIVE relocations, None = skip check)
         verbose: Print detailed information
 
     Returns:
@@ -1020,23 +1026,28 @@ def find_and_update_relocation(
                 # Extract relocation type
                 reloc_type = rela.r_info & 0xFFFFFFFF
 
-                if reloc_type != R_X86_64_RELATIVE:
-                    if verbose:
-                        print(
-                            f"  WARNING: Found relocation at 0x{vaddr:x} "
-                            f"but type is {reloc_type}, not R_X86_64_RELATIVE (8)",
-                            file=sys.stderr,
-                        )
-                    continue
-
                 if verbose:
                     print(f"  Found in {section_name}[{entry_idx}]:")
                     print(f"    r_offset: 0x{rela.r_offset:x}")
                     print(f"    r_info: 0x{rela.r_info:x} (type={reloc_type})")
                     print(f"    r_addend: 0x{rela.r_addend:x}")
 
-                # Validate old addend if specified
-                if old_addend is not None and rela.r_addend != old_addend:
+                # Convert any relocation type to R_X86_64_RELATIVE
+                # We're completely replacing the pointer semantics, so we don't
+                # need to preserve the original relocation type
+                if reloc_type != R_X86_64_RELATIVE:
+                    if verbose:
+                        print(
+                            f"  Converting relocation type {reloc_type} -> "
+                            f"R_X86_64_RELATIVE ({R_X86_64_RELATIVE})"
+                        )
+
+                # Validate old addend if specified (only meaningful for RELATIVE)
+                if (
+                    old_addend is not None
+                    and reloc_type == R_X86_64_RELATIVE
+                    and rela.r_addend != old_addend
+                ):
                     if verbose:
                         print(
                             f"  WARNING: Expected addend 0x{old_addend:x}, "
@@ -1045,14 +1056,21 @@ def find_and_update_relocation(
                         )
                         print(f"  Updating anyway...", file=sys.stderr)
 
-                # Update addend
-                new_rela = Elf64_Rela(rela.r_offset, rela.r_info, new_addend)
+                # Update relocation: convert to R_X86_64_RELATIVE with new addend
+                # r_info = R_X86_64_RELATIVE (type 8, symbol index 0)
+                new_rela = Elf64_Rela(rela.r_offset, R_X86_64_RELATIVE, new_addend)
                 write_rela_entry(data, entry_offset, new_rela)
 
                 if verbose:
-                    print(
-                        f"  ✅ Updated addend: 0x{rela.r_addend:x} -> 0x{new_addend:x}"
-                    )
+                    if reloc_type != R_X86_64_RELATIVE:
+                        print(
+                            f"  ✅ Converted to R_X86_64_RELATIVE, "
+                            f"addend: 0x{new_addend:x}"
+                        )
+                    else:
+                        print(
+                            f"  ✅ Updated addend: 0x{rela.r_addend:x} -> 0x{new_addend:x}"
+                        )
 
                 return True
 
@@ -1142,14 +1160,14 @@ def set_pointer(
 
     This is a high-level operation that combines:
     1. Writing the pointer value directly to the file
-    2. Updating any R_X86_64_RELATIVE relocation if it exists
+    2. Finding and converting any relocation at the pointer address to R_X86_64_RELATIVE
 
     Args:
         input_path: Input ELF binary
         output_path: Output ELF binary
         pointer_vaddr: Virtual address of pointer location
         target_vaddr: Virtual address to point to
-        update_relocation: If True, update R_X86_64_RELATIVE relocation (default: True)
+        update_relocation: If True, update relocation to R_X86_64_RELATIVE (default: True)
         verbose: Print progress information
 
     Returns:
@@ -1157,12 +1175,9 @@ def set_pointer(
 
     Important:
         For PIE executables and shared libraries (ET_DYN type), the pointer location
-        MUST have an existing R_X86_64_RELATIVE relocation. This function updates
-        existing relocations but does not create new ones.
-
-        To ensure a relocation exists, the pointer must be initialized in the source
-        code with a relocatable address (e.g., &symbol) rather than a constant
-        (e.g., 0x1000).
+        MUST have an existing relocation (R_X86_64_RELATIVE or R_X86_64_64). This
+        function converts any relocation type to R_X86_64_RELATIVE with the target
+        address as the addend.
 
         Non-PIE executables (ET_EXEC type) do not require relocations, as they use
         absolute addressing.

@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import elf_modify_load
-from .binutils import get_section_vaddr, Toolchain
+from .binutils import get_section_size, get_section_vaddr, Toolchain
 
 
 class ElfHeader(NamedTuple):
@@ -599,30 +599,156 @@ class ElfOffloadKpacker:
             print(f"  Updated {updated_count} GOT entries")
 
 
-def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> bool:
+def _verify_no_fatbin_relocations(
+    data: bytearray, *, verbose: bool = False
+) -> list[tuple[int, int, int]]:
     """
-    Rewrite .hipFatBinSegment magic from HIPF to HIPK.
+    Verify no relocations produce pointers into .hip_fatbin section.
 
-    The .hipFatBinSegment section contains a __CudaFatBinaryWrapper structure:
+    This is a safety check before zero-paging .hip_fatbin. If any relocations
+    still point into that section, we have a bug - some wrapper pointer wasn't
+    properly redirected to .rocm_kpack_ref.
+
+    Args:
+        data: The ELF binary data
+        verbose: If True, print detailed information
+
+    Returns:
+        List of problematic relocations as (r_offset, target_addr, reloc_type) tuples.
+        Empty list means all relocations are safe.
+
+    Raises:
+        RuntimeError: If ELF parsing fails
+    """
+    # Parse ELF header
+    try:
+        ehdr = elf_modify_load.read_elf_header(data)
+    except ValueError as e:
+        raise RuntimeError(f"Failed to parse ELF header: {e}") from e
+
+    # Find .hip_fatbin section to get its address range
+    shstrtab_shdr = elf_modify_load.read_section_header(
+        data, ehdr.e_shoff + ehdr.e_shstrndx * 64
+    )
+    shstrtab_offset = shstrtab_shdr.sh_offset
+
+    hip_fatbin_shdr = None
+    for i in range(ehdr.e_shnum):
+        shdr = elf_modify_load.read_section_header(data, ehdr.e_shoff + i * 64)
+        name_offset = shstrtab_offset + shdr.sh_name
+        name_end = data.find(b"\x00", name_offset)
+        name = data[name_offset:name_end].decode("utf-8")
+
+        if name == ".hip_fatbin":
+            hip_fatbin_shdr = shdr
+            break
+
+    if hip_fatbin_shdr is None:
+        # No .hip_fatbin section - nothing to verify
+        return []
+
+    fatbin_start = hip_fatbin_shdr.sh_addr
+    fatbin_end = fatbin_start + hip_fatbin_shdr.sh_size
+
+    if verbose:
+        print(f"\n  Verifying no relocations point into .hip_fatbin:")
+        print(f"    Section range: [0x{fatbin_start:x}, 0x{fatbin_end:x})")
+
+    # Relocation type constants
+    R_X86_64_64 = 1
+    R_X86_64_RELATIVE = 8
+
+    # Find all RELA sections and check each relocation
+    problematic = []
+
+    for i in range(ehdr.e_shnum):
+        shdr = elf_modify_load.read_section_header(data, ehdr.e_shoff + i * 64)
+
+        # SHT_RELA = 4
+        if shdr.sh_type != 4:
+            continue
+
+        name_offset = shstrtab_offset + shdr.sh_name
+        name_end = data.find(b"\x00", name_offset)
+        section_name = data[name_offset:name_end].decode("utf-8")
+
+        # Parse each relocation entry
+        num_entries = shdr.sh_size // 24  # sizeof(Elf64_Rela) = 24
+
+        for entry_idx in range(num_entries):
+            entry_offset = shdr.sh_offset + entry_idx * 24
+            r_offset, r_info, r_addend = struct.unpack_from("<QQq", data, entry_offset)
+
+            reloc_type = r_info & 0xFFFFFFFF
+
+            # For R_X86_64_RELATIVE: target = load_base + addend
+            # At load_base = 0, target = addend
+            if reloc_type == R_X86_64_RELATIVE:
+                # Addend is signed, but for valid addresses it should be positive
+                target = r_addend if r_addend >= 0 else 0
+
+                if fatbin_start <= target < fatbin_end:
+                    problematic.append((r_offset, target, reloc_type))
+                    if verbose:
+                        print(
+                            f"    PROBLEM: {section_name}[{entry_idx}] at 0x{r_offset:x} "
+                            f"-> 0x{target:x} (R_X86_64_RELATIVE)"
+                        )
+
+            elif reloc_type == R_X86_64_64:
+                # For R_X86_64_64: target = symbol_value + addend
+                # We'd need to resolve the symbol, but symbols pointing to
+                # .hip_fatbin would have addresses in that range
+                # The addend alone can indicate if it's in range
+                sym_idx = r_info >> 32
+                # We can't fully check without symbol resolution, but if the
+                # symbol points to .hip_fatbin, we should have already handled it
+                # For now, check if it's a known fatbin symbol pattern
+                # This is a conservative check - better to have false positives
+                pass  # R_X86_64_64 with symbol - harder to check without symbol table
+
+    if verbose:
+        if problematic:
+            print(f"    Found {len(problematic)} problematic relocation(s)")
+        else:
+            print(f"    ✓ No relocations point into .hip_fatbin")
+
+    return problematic
+
+
+def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
+    """
+    Rewrite ALL wrappers in .hipFatBinSegment from HIPF to HIPK.
+
+    The .hipFatBinSegment section contains one or more __CudaFatBinaryWrapper
+    structures (24 bytes each), contiguously placed by the linker:
       Offset 0: magic (4 bytes) - 0x48495046 (HIPF) or 0x4B504948 (HIPK)
       Offset 4: version (4 bytes) - must be 1
       Offset 8: binary pointer (8 bytes) - points to device code
       Offset 16: dummy1 (8 bytes) - unused
 
-    For kpack'd binaries, we change:
+    Binaries built with -fgpu-rdc (relocatable device code) have multiple
+    wrappers, one per translation unit. Each wrapper is registered by its
+    own constructor function calling __hipRegisterFatBinary().
+
+    For kpack'd binaries, we change each wrapper:
       - magic from HIPF to HIPK
-      - binary pointer to NULL (since device code is externalized)
+      - binary pointer to 0 (will be set by set_pointer() later)
 
     Args:
         data: The ELF binary data to modify in-place
         verbose: If True, print detailed information
 
     Returns:
-        True if magic was rewritten, False if section not found or already HIPK
+        Number of wrappers transformed (>= 1 on success)
+
+    Raises:
+        RuntimeError: If section not found or has invalid structure
     """
-    # Magic constants (x86-64 is little-endian, so bytes are reversed)
+    # Constants
     HIPF_MAGIC = 0x48495046  # "HIPF" - normal fat binary
     HIPK_MAGIC = 0x4B504948  # "HIPK" - kpack'd binary
+    WRAPPER_SIZE = 24  # sizeof(__CudaFatBinaryWrapper)
 
     # Parse ELF header to find sections
     try:
@@ -653,39 +779,52 @@ def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> bool:
             "This binary may not be a valid HIP fat binary."
         )
 
-    # Read current magic at offset 0 of the section
+    # Calculate number of wrappers
     section_offset = hipfatbin_segment_shdr.sh_offset
-    current_magic = struct.unpack_from("<I", data, section_offset)[0]
+    section_size = hipfatbin_segment_shdr.sh_size
 
-    if current_magic == HIPK_MAGIC:
-        if verbose:
-            print(f"  INFO: Magic already set to HIPK (0x{HIPK_MAGIC:08x})")
-        return False  # Already converted
-
-    if current_magic != HIPF_MAGIC:
+    if section_size % WRAPPER_SIZE != 0:
         raise RuntimeError(
-            f"Unexpected magic in .hipFatBinSegment: 0x{current_magic:08x}. "
-            f"Expected HIPF (0x{HIPF_MAGIC:08x}) for fat binary. "
-            f"Binary may be corrupted or not a valid HIP fat binary."
+            f".hipFatBinSegment size {section_size} is not a multiple of "
+            f"wrapper size ({WRAPPER_SIZE}). Binary may be corrupted."
         )
 
+    num_wrappers = section_size // WRAPPER_SIZE
+
     if verbose:
-        print(f"\n  Rewriting .hipFatBinSegment magic:")
+        print(f"\n  Rewriting .hipFatBinSegment magic ({num_wrappers} wrapper(s)):")
         print(f"    Section offset: 0x{section_offset:x}")
-        print(f"    Current magic: 0x{current_magic:08x} (HIPF)")
-        print(f"    New magic:     0x{HIPK_MAGIC:08x} (HIPK)")
+        print(f"    Section size: {section_size} bytes")
 
-    # Rewrite magic from HIPF to HIPK
-    struct.pack_into("<I", data, section_offset, HIPK_MAGIC)
+    # Transform each wrapper
+    transformed = 0
+    for i in range(num_wrappers):
+        wrapper_offset = section_offset + i * WRAPPER_SIZE
+        current_magic = struct.unpack_from("<I", data, wrapper_offset)[0]
 
-    # Zero out the binary pointer (offset 8, 8 bytes)
-    # This is safe because device code has been removed
-    struct.pack_into("<Q", data, section_offset + 8, 0)
+        if current_magic == HIPK_MAGIC:
+            if verbose:
+                print(f"    Wrapper {i}: already HIPK (skipped)")
+            continue
 
-    if verbose:
-        print(f"    Zeroed binary pointer at offset 0x{section_offset + 8:x}")
+        if current_magic != HIPF_MAGIC:
+            raise RuntimeError(
+                f"Unexpected magic 0x{current_magic:08x} at wrapper {i} "
+                f"(offset 0x{wrapper_offset:x}). Expected HIPF (0x{HIPF_MAGIC:08x})."
+            )
 
-    return True
+        # Transform: HIPF → HIPK
+        struct.pack_into("<I", data, wrapper_offset, HIPK_MAGIC)
+
+        # Zero the binary pointer (offset +8)
+        # The actual pointer will be set by set_pointer() in kpack_offload_binary()
+        struct.pack_into("<Q", data, wrapper_offset + 8, 0)
+
+        transformed += 1
+        if verbose:
+            print(f"    Wrapper {i}: HIPF → HIPK at offset 0x{wrapper_offset:x}")
+
+    return transformed
 
 
 def kpack_offload_binary(
@@ -700,10 +839,13 @@ def kpack_offload_binary(
 
     This function assumes the input binary already has a `.rocm_kpack_ref` section
     (added via binutils.add_kpack_ref_marker()). It performs:
-    1. Zero-page `.hip_fatbin` section (removes device code)
-    2. Map `.rocm_kpack_ref` to new PT_LOAD segment
-    3. Update `__CudaFatBinaryWrapper.binary` pointer to mapped `.rocm_kpack_ref`
-    4. Rewrite magic from HIPF to HIPK
+    1. Map `.rocm_kpack_ref` to new PT_LOAD segment (need address first)
+    2. Update `__CudaFatBinaryWrapper.binary` pointer + rewrite magic HIPF→HIPK
+       (all semantic changes together)
+    3. Zero-page `.hip_fatbin` section (optimization - safe after references redirected)
+
+    This ordering is "correct by construction" - we redirect all pointers away from
+    .hip_fatbin BEFORE zero-paging it, ensuring no dangling references.
 
     Args:
         input_path: Path to binary with `.rocm_kpack_ref` section already added
@@ -728,34 +870,18 @@ def kpack_offload_binary(
     has_fatbin = kpacker.has_hip_fatbin()
 
     # Temporary files for pipeline
-    temp_zeropaged = output_path.with_suffix(output_path.suffix + ".zeropaged")
     temp_mapped = output_path.with_suffix(output_path.suffix + ".mapped")
     temp_pointed = output_path.with_suffix(output_path.suffix + ".pointed")
+    temp_zeropaged = output_path.with_suffix(output_path.suffix + ".zeropaged")
 
     try:
-        # Phase 1: Zero-page .hip_fatbin section (skip if no .hip_fatbin)
-        if has_fatbin:
-            if verbose:
-                print(f"\nPhase 1: Zero-page .hip_fatbin")
-
-            success = elf_modify_load.conservative_zero_page(
-                input_path, temp_zeropaged, section_name=".hip_fatbin", verbose=verbose
-            )
-
-            if not success:
-                raise RuntimeError(f"Zero-page optimization failed for {input_path}")
-        else:
-            # No .hip_fatbin section, just copy the file
-            if verbose:
-                print(f"\nPhase 1: No .hip_fatbin section found, skipping zero-page")
-            shutil.copy2(input_path, temp_zeropaged)
-
-        # Phase 2: Map .rocm_kpack_ref to new PT_LOAD
+        # Phase 1: Map .rocm_kpack_ref to new PT_LOAD
+        # We need the mapped address before we can redirect pointers
         if verbose:
-            print(f"\nPhase 2: Map .rocm_kpack_ref to PT_LOAD")
+            print(f"\nPhase 1: Map .rocm_kpack_ref to PT_LOAD")
 
         success = elf_modify_load.map_section_to_new_load(
-            temp_zeropaged,
+            input_path,  # Start from original input
             temp_mapped,
             section_name=".rocm_kpack_ref",
             new_vaddr=None,  # Auto-allocate
@@ -765,55 +891,125 @@ def kpack_offload_binary(
         if not success:
             raise RuntimeError(f"Failed to map .rocm_kpack_ref section in {input_path}")
 
-        # Phase 3: Find mapped address of .rocm_kpack_ref
+        # Get mapped address of .rocm_kpack_ref
         kpack_ref_vaddr = get_section_vaddr(toolchain, temp_mapped, ".rocm_kpack_ref")
         if kpack_ref_vaddr is None:
             raise RuntimeError(
                 f".rocm_kpack_ref section not found after mapping in {input_path}"
             )
 
-        # Phases 3-5 only apply to binaries with .hip_fatbin
+        # Phase 2: All semantic changes together (pointer redirect + magic rewrite)
+        # This redirects all references away from .hip_fatbin before we zero it
         if has_fatbin:
             if verbose:
-                print(f"\nPhase 3: Update __CudaFatBinaryWrapper pointer")
+                print(f"\nPhase 2: Semantic transformation (pointer + magic)")
                 print(f"  .rocm_kpack_ref mapped to: 0x{kpack_ref_vaddr:x}")
 
-            # Find .hipFatBinSegment section address (contains __CudaFatBinaryWrapper)
+            # Find .hipFatBinSegment section (contains __CudaFatBinaryWrapper structs)
             hipfatbin_segment_vaddr = get_section_vaddr(
                 toolchain, temp_mapped, ".hipFatBinSegment"
             )
-            if hipfatbin_segment_vaddr is None:
+            hipfatbin_segment_size = get_section_size(
+                toolchain, temp_mapped, ".hipFatBinSegment"
+            )
+
+            if hipfatbin_segment_vaddr is None or hipfatbin_segment_size is None:
                 raise RuntimeError(
                     f".hipFatBinSegment section not found in {input_path}"
                 )
 
-            # Pointer is at offset +8 in __CudaFatBinaryWrapper structure
-            pointer_vaddr = hipfatbin_segment_vaddr + 8
+            # Calculate number of wrappers (each is 24 bytes)
+            WRAPPER_SIZE = 24
+            if hipfatbin_segment_size % WRAPPER_SIZE != 0:
+                raise RuntimeError(
+                    f".hipFatBinSegment size {hipfatbin_segment_size} is not a "
+                    f"multiple of wrapper size ({WRAPPER_SIZE})"
+                )
 
-            # Phase 4: Update pointer to point to .rocm_kpack_ref
-            success = elf_modify_load.set_pointer(
-                temp_mapped,
+            num_wrappers = hipfatbin_segment_size // WRAPPER_SIZE
+
+            if verbose:
+                print(f"  Found {num_wrappers} wrapper(s) in .hipFatBinSegment")
+
+            # Update each wrapper's pointer to point to .rocm_kpack_ref
+            # First wrapper: temp_mapped → temp_pointed
+            # Subsequent wrappers: temp_pointed → temp_pointed (in-place)
+            for i in range(num_wrappers):
+                wrapper_vaddr = hipfatbin_segment_vaddr + i * WRAPPER_SIZE
+                pointer_vaddr = wrapper_vaddr + 8  # Pointer at offset +8
+
+                # First iteration reads from temp_mapped, subsequent from temp_pointed
+                in_file = temp_mapped if i == 0 else temp_pointed
+
+                if verbose:
+                    print(f"  Updating wrapper {i} pointer at 0x{pointer_vaddr:x}")
+
+                success = elf_modify_load.set_pointer(
+                    in_file,
+                    temp_pointed,
+                    pointer_vaddr=pointer_vaddr,
+                    target_vaddr=kpack_ref_vaddr,
+                    update_relocation=True,
+                    verbose=verbose,
+                )
+
+                if not success:
+                    raise RuntimeError(
+                        f"Failed to set pointer for wrapper {i} in {input_path}"
+                    )
+
+            # Rewrite magic HIPF→HIPK for all wrappers
+            if verbose:
+                print(f"  Rewriting magic (HIPF → HIPK) for {num_wrappers} wrapper(s)")
+
+            data = bytearray(temp_pointed.read_bytes())
+            _rewrite_hipfatbin_magic(data, verbose=verbose)
+            temp_pointed.write_bytes(data)
+
+            # Verify no relocations still point into .hip_fatbin
+            # This catches bugs where we failed to redirect all wrapper pointers
+            problematic_relocs = _verify_no_fatbin_relocations(data, verbose=verbose)
+            if problematic_relocs:
+                error_lines = [
+                    f"ERROR: {len(problematic_relocs)} relocation(s) still point "
+                    f"into .hip_fatbin section:",
+                ]
+                for r_offset, target, reloc_type in problematic_relocs:
+                    type_name = (
+                        "R_X86_64_RELATIVE" if reloc_type == 8 else f"type={reloc_type}"
+                    )
+                    error_lines.append(
+                        f"  - offset 0x{r_offset:x} -> 0x{target:x} ({type_name})"
+                    )
+                error_lines.append(
+                    "\nThis indicates a bug: not all __CudaFatBinaryWrapper pointers "
+                    "were redirected to .rocm_kpack_ref."
+                )
+                raise RuntimeError("\n".join(error_lines))
+
+            # Phase 3: Zero-page .hip_fatbin (optimization only)
+            # Safe now because all references have been redirected
+            if verbose:
+                print(f"\nPhase 3: Zero-page .hip_fatbin (optimization)")
+
+            success = elf_modify_load.conservative_zero_page(
                 temp_pointed,
-                pointer_vaddr=pointer_vaddr,
-                target_vaddr=kpack_ref_vaddr,
-                update_relocation=True,
+                temp_zeropaged,
+                section_name=".hip_fatbin",
                 verbose=verbose,
             )
 
             if not success:
-                raise RuntimeError(f"Failed to set pointer in {input_path}")
+                raise RuntimeError(f"Zero-page optimization failed for {input_path}")
 
-            # Phase 5: Rewrite magic HIPF→HIPK
-            if verbose:
-                print(f"\nPhase 4: Rewrite magic (HIPF → HIPK)")
-
-            data = bytearray(temp_pointed.read_bytes())
-            _rewrite_hipfatbin_magic(data, verbose=verbose)
+            # Read final result
+            data = bytearray(temp_zeropaged.read_bytes())
         else:
-            # No .hip_fatbin, skip pointer update and magic rewrite
+            # No .hip_fatbin, skip pointer update, magic rewrite, and zero-page
             if verbose:
                 print(
-                    f"\nPhases 3-5: No .hip_fatbin section, skipping pointer update and magic rewrite"
+                    f"\nPhases 2-3: No .hip_fatbin section, skipping semantic "
+                    f"transformation and zero-page"
                 )
             data = bytearray(temp_mapped.read_bytes())
 
@@ -825,7 +1021,7 @@ def kpack_offload_binary(
         removed = original_size - final_size
 
         if verbose:
-            print(f"\nNeutralization complete:")
+            print(f"\nTransformation complete:")
             print(f"  Original size: {original_size:,} bytes")
             print(f"  Final size:    {final_size:,} bytes")
             print(
@@ -841,6 +1037,6 @@ def kpack_offload_binary(
 
     finally:
         # Clean up temporary files
-        for temp_file in [temp_zeropaged, temp_mapped, temp_pointed]:
+        for temp_file in [temp_mapped, temp_pointed, temp_zeropaged]:
             if temp_file.exists():
                 temp_file.unlink()

@@ -1,5 +1,5 @@
-Test Bundled Binaries Generated: 2025-10-30 18:20:34.147493
-ROCm Path: /home/stella/workspace/rocm/gfx1100
+Test Bundled Binaries Generated: 2025-12-29 22:59:19.373659
+ROCm Path: /home/stella/claude-rocm-workspace/rocm/gfx1100
 Code Object Version: 5
 Platform: linux
 Compiler: HIP version: 7.1.25432-ba73a9bf4c
@@ -13,6 +13,7 @@ Bundled Executables (with GPU device code):
 Bundled Shared Libraries (with GPU device code):
 - libtest_kernel_single.so: Single architecture (gfx1100)
 - libtest_kernel_multi.so: Multiple architectures (gfx1100, gfx1101)
+- libtest_multi_wrapper.so: RDC build with 2 __CudaFatBinaryWrapper structs (gfx1100)
 
 Host-Only Binaries (NO GPU device code, for negative testing):
 - host_only.exe: Host-only executable
@@ -23,6 +24,8 @@ Host-only binaries contain only CPU code with no .hip_fatbin sections.
 
 Sources:
 - test_generation/simple_kernel.hip (GPU kernels)
+- test_generation/multi_wrapper_kernel1.hip (RDC kernel 1)
+- test_generation/multi_wrapper_kernel2.hip (RDC kernel 2)
 - test_generation/host_only.cpp (host-only code)
 Build Script: test_generation/build_test_bundles.py
 

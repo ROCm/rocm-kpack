@@ -28,6 +28,8 @@ class BundleBuilder:
         self.script_dir = Path(__file__).parent
         self.kernel_src = self.script_dir / "simple_kernel.hip"
         self.host_only_src = self.script_dir / "host_only.cpp"
+        self.multi_wrapper_src1 = self.script_dir / "multi_wrapper_kernel1.hip"
+        self.multi_wrapper_src2 = self.script_dir / "multi_wrapper_kernel2.hip"
 
         # Detect platform first (needed by other methods)
         system = platform.system().lower()
@@ -354,6 +356,83 @@ class BundleBuilder:
             output,
         )
 
+    def build_shared_lib_multi_wrapper(self):
+        """Build shared library with multiple fat binary wrappers.
+
+        This builds two separate translation units with -fgpu-rdc (relocatable
+        device code) and links them together. Each TU generates its own
+        __CudaFatBinaryWrapper in .hipFatBinSegment, resulting in multiple
+        wrappers in the final binary.
+
+        This is common in large projects like RCCL that use RDC builds, and
+        tests the kpack splitter's ability to transform ALL wrappers.
+        """
+        if self.platform == "windows":
+            lib_name = "test_multi_wrapper.dll"
+        else:
+            lib_name = "libtest_multi_wrapper.so"
+
+        print(f"\nBuilding: {lib_name} (RDC build with 2 wrappers)")
+
+        # Create temp directory for intermediate object files
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmpdir = Path(tmpdir)
+            obj1 = tmpdir / "kernel1.o"
+            obj2 = tmpdir / "kernel2.o"
+            output = self.output_dir / lib_name
+
+            # Compile first TU with -fgpu-rdc
+            print(f"  Compiling kernel1 with -fgpu-rdc...")
+            cmd1 = [
+                str(self.hipcc),
+                "-fgpu-rdc",
+                "-c",
+                str(self.multi_wrapper_src1),
+                "--offload-arch=gfx1100",
+                "-fPIC",
+                "-o",
+                str(obj1),
+            ]
+            try:
+                subprocess.run(cmd1, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as e:
+                print(f"  ✗ Failed to compile kernel1: {e.stderr}")
+                return False
+
+            # Compile second TU with -fgpu-rdc
+            print(f"  Compiling kernel2 with -fgpu-rdc...")
+            cmd2 = [
+                str(self.hipcc),
+                "-fgpu-rdc",
+                "-c",
+                str(self.multi_wrapper_src2),
+                "--offload-arch=gfx1100",
+                "-fPIC",
+                "-o",
+                str(obj2),
+            ]
+            try:
+                subprocess.run(cmd2, check=True, capture_output=True, text=True)
+            except subprocess.CalledProcessError as e:
+                print(f"  ✗ Failed to compile kernel2: {e.stderr}")
+                return False
+
+            # Link with -fgpu-rdc
+            print(f"  Linking with -fgpu-rdc...")
+            return self._run_hipcc(
+                [
+                    "-fgpu-rdc",
+                    str(obj1),
+                    str(obj2),
+                    "-shared",
+                    "-o",
+                    str(output),
+                ],
+                output,
+            )
+
     def build_host_only_executable(self):
         """Build host-only executable (no GPU device code)."""
         exe_name = "host_only.exe"
@@ -427,6 +506,7 @@ Bundled Executables (with GPU device code):
 Bundled Shared Libraries (with GPU device code):
 - {lib_prefix}test_kernel_single{lib_ext}: Single architecture (gfx1100)
 - {lib_prefix}test_kernel_multi{lib_ext}: Multiple architectures (gfx1100, gfx1101)
+- {lib_prefix}test_multi_wrapper{lib_ext}: RDC build with 2 __CudaFatBinaryWrapper structs (gfx1100)
 
 Host-Only Binaries (NO GPU device code, for negative testing):
 - host_only.exe: Host-only executable
@@ -437,6 +517,8 @@ Host-only binaries contain only CPU code with no .hip_fatbin sections.
 
 Sources:
 - test_generation/simple_kernel.hip (GPU kernels)
+- test_generation/multi_wrapper_kernel1.hip (RDC kernel 1)
+- test_generation/multi_wrapper_kernel2.hip (RDC kernel 2)
 - test_generation/host_only.cpp (host-only code)
 Build Script: test_generation/build_test_bundles.py
 
@@ -476,6 +558,8 @@ These assets are used to test unbundling functionality across:
             # Bundled shared libraries
             "test_kernel_single (so/dll)": self.build_shared_lib_single_arch(),
             "test_kernel_multi (so/dll)": self.build_shared_lib_multi_arch(),
+            # Multi-wrapper shared library (RDC build)
+            "test_multi_wrapper (so/dll)": self.build_shared_lib_multi_wrapper(),
             # Host-only binaries (for negative testing)
             "host_only (exe)": self.build_host_only_executable(),
             "host_only (so/dll)": self.build_host_only_shared_lib(),

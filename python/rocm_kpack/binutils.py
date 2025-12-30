@@ -669,6 +669,53 @@ def get_section_vaddr(
     return None
 
 
+def get_section_size(
+    toolchain: Toolchain, binary_path: Path, section_name: str
+) -> int | None:
+    """
+    Get the size of a section in an ELF binary.
+
+    Args:
+        toolchain: Toolchain instance providing readelf
+        binary_path: Path to ELF binary
+        section_name: Name of section (e.g., ".hipFatBinSegment")
+
+    Returns:
+        Size (sh_size) of the section if found, None otherwise.
+    """
+    try:
+        result = subprocess.run(
+            [str(toolchain.readelf), "-S", str(binary_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError:
+        return None
+
+    # Parse section headers
+    # Format (two-line entries):
+    # Line 1: [Nr] Name              Type             Address           Offset
+    # Line 2:      Size              EntSize          Flags  Link  Info  Align
+    lines = result.stdout.split("\n")
+    for i, line in enumerate(lines):
+        if section_name in line:
+            parts = line.split()
+            # Check if this is a section header line (starts with [Nr])
+            if len(parts) >= 5 and parts[0].startswith("["):
+                try:
+                    # Size is on the next line, first column
+                    if i + 1 < len(lines):
+                        next_parts = lines[i + 1].split()
+                        if len(next_parts) >= 1:
+                            size = int(next_parts[0], 16)
+                            return size
+                except (ValueError, IndexError):
+                    continue
+
+    return None
+
+
 def has_section(
     binary_path: Path,
     section_name: str,

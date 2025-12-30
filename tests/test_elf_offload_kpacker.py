@@ -277,3 +277,114 @@ def test_kpacked_binary_compatible_with_objcopy(
     assert output_with_marker.exists()
     # Note: objcopy may re-layout the binary and remove padding, so size might not increase
     # The important thing is that it succeeded and the marker is present
+
+
+def test_kpack_multi_wrapper_binary(
+    tmp_path: Path, test_assets_dir: Path, toolchain: binutils.Toolchain
+):
+    """Test kpacking a binary with multiple __CudaFatBinaryWrapper structures.
+
+    Binaries built with -fgpu-rdc (relocatable device code) have multiple
+    fat binary wrappers in .hipFatBinSegment - one per translation unit.
+    The kpacker must transform ALL wrappers, not just the first one.
+    """
+    input_library = (
+        test_assets_dir / "bundled_binaries/linux/cov5/libtest_multi_wrapper.so"
+    )
+    marked_library = tmp_path / "libtest_multi_wrapper_marked.so"
+    output_library = tmp_path / "libtest_multi_wrapper_kpacked.so"
+
+    # Add .rocm_kpack_ref section first
+    binutils.add_kpack_ref_marker(
+        input_library,
+        marked_library,
+        kpack_search_paths=["test.kpack"],
+        kernel_name="test_kernel",
+        toolchain=toolchain,
+    )
+
+    original_size = marked_library.stat().st_size
+
+    # Kpack the binary
+    result = kpack_offload_binary(
+        marked_library, output_library, toolchain=toolchain, verbose=True
+    )
+
+    # Verify output exists and size reduced
+    assert output_library.exists()
+    assert output_library.stat().st_size < original_size
+    assert result["removed"] > 0
+
+    # Verify .hipFatBinSegment has 2 wrappers (48 bytes = 2 * 24)
+    sections_result = subprocess.run(
+        [toolchain.readelf, "-S", output_library], capture_output=True, text=True
+    )
+    assert sections_result.returncode == 0
+
+    # Parse section size to verify 2 wrappers
+    # readelf output spans two lines per section, e.g.:
+    #   [23] .hipFatBinSegment PROGBITS   0000000000008fa8  00005fa8
+    #        0000000000000030  0000000000000000  WA       0     0     8
+    lines = sections_result.stdout.split("\n")
+    found_section = False
+    for i, line in enumerate(lines):
+        if ".hipFatBinSegment" in line:
+            found_section = True
+            # Size is on the next line (continuation)
+            if i + 1 < len(lines):
+                next_line = lines[i + 1]
+                # The size should be 0x30 = 48 bytes (2 wrappers * 24 bytes each)
+                assert "0000000000000030" in next_line or "00000030" in next_line, (
+                    f"Expected .hipFatBinSegment size 0x30 (48 bytes) for 2 wrappers, "
+                    f"got continuation line: {next_line}"
+                )
+            break
+
+    assert found_section, ".hipFatBinSegment section not found in output binary"
+
+    # Verify BOTH wrappers have HIPK magic (not HIPF)
+    # Read the .hipFatBinSegment section directly
+    with open(output_library, "rb") as f:
+        data = f.read()
+
+    # Find .hipFatBinSegment offset by parsing readelf output
+    # Format: [Nr] Name Type Addr Offset (on first line)
+    #         Size EntSz Flags Link Info Align (on second line)
+    section_offset = None
+    for i, line in enumerate(lines):
+        if ".hipFatBinSegment" in line:
+            # Get hex values from header line (addr, offset)
+            parts = line.split()
+            hex_vals = [
+                p
+                for p in parts
+                if all(c in "0123456789abcdef" for c in p.lower()) and len(p) >= 4
+            ]
+            if len(hex_vals) >= 2:
+                section_offset = int(hex_vals[1], 16)  # Second hex is file offset
+            break
+
+    assert section_offset is not None, "Could not parse .hipFatBinSegment offset"
+
+    # HIPK magic = 0x4B504948 = "HIPK" in little-endian
+    HIPK_MAGIC = 0x4B504948
+    import struct
+
+    # Check wrapper 1 at offset 0
+    wrapper1_magic = struct.unpack_from("<I", data, section_offset)[0]
+    assert (
+        wrapper1_magic == HIPK_MAGIC
+    ), f"Wrapper 1 should have HIPK magic, got 0x{wrapper1_magic:08x}"
+
+    # Check wrapper 2 at offset 24
+    wrapper2_magic = struct.unpack_from("<I", data, section_offset + 24)[0]
+    assert (
+        wrapper2_magic == HIPK_MAGIC
+    ), f"Wrapper 2 should have HIPK magic, got 0x{wrapper2_magic:08x}"
+
+    # Verify it's still a valid shared library
+    readelf_result = subprocess.run(
+        [toolchain.readelf, "-h", output_library], capture_output=True, text=True
+    )
+    assert readelf_result.returncode == 0
+    assert "DYN (Shared object file)" in readelf_result.stdout
