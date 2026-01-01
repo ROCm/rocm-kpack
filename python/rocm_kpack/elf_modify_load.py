@@ -908,16 +908,16 @@ def map_section_to_new_load(
     old_phdr_size = ehdr.e_phnum * 56
     min_content_offset = len(data)
 
-    # Check section headers
+    # Check section headers - use >= to include sections starting exactly at PHDR end
     for i in range(ehdr.e_shnum):
         shdr = read_section_header(data, ehdr.e_shoff + i * 64)
-        if shdr.sh_offset > ehdr.e_phoff + old_phdr_size:
+        if shdr.sh_offset >= ehdr.e_phoff + old_phdr_size:
             min_content_offset = min(min_content_offset, shdr.sh_offset)
 
     # Also check program headers for data they reference (e.g., PT_INTERP)
     for i in range(ehdr.e_phnum):
         phdr = read_program_header(data, ehdr.e_phoff + i * 56)
-        if phdr.p_offset > ehdr.e_phoff + old_phdr_size and phdr.p_filesz > 0:
+        if phdr.p_offset >= ehdr.e_phoff + old_phdr_size and phdr.p_filesz > 0:
             min_content_offset = min(min_content_offset, phdr.p_offset)
 
     # Resize program header table (handles in-place or relocation)
