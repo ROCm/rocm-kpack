@@ -27,9 +27,9 @@ target_include_directories(rocm_kpack
         $<INSTALL_INTERFACE:include>
 )
 
-# Link dependencies
+# Link dependencies - PRIVATE since they're not exposed in public API
 target_link_libraries(rocm_kpack
-    PUBLIC
+    PRIVATE
         msgpack-cxx
         zstd::libzstd
 )
@@ -82,6 +82,27 @@ install(TARGETS rocm_kpack
 install(EXPORT rocm-kpack-targets
     FILE rocm-kpack-targets.cmake
     NAMESPACE rocm::
+    DESTINATION lib/cmake/rocm-kpack
+)
+
+# Generate and install CMake package config files
+include(CMakePackageConfigHelpers)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_SOURCE_DIR}/cmake/rocm-kpack-config.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/rocm-kpack-config.cmake"
+    INSTALL_DESTINATION lib/cmake/rocm-kpack
+)
+
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/rocm-kpack-config-version.cmake"
+    VERSION ${PROJECT_VERSION}
+    COMPATIBILITY SameMajorVersion
+)
+
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/rocm-kpack-config.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/rocm-kpack-config-version.cmake"
     DESTINATION lib/cmake/rocm-kpack
 )
 
