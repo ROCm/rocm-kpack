@@ -370,3 +370,158 @@ def list_ccob_targets(data: bytes) -> list[str]:
     decompressed = decompress_ccob(data)
     bundle = UncompressedBundle.parse(decompressed)
     return bundle.list_triples()
+
+
+# =============================================================================
+# Concatenated Bundle Support
+# =============================================================================
+#
+# rocRAND and other libraries use RDC (relocatable device code) which results
+# in multiple CLANG_OFFLOAD_BUNDLE blocks concatenated in the .hip_fatbin
+# section. The clang-offload-bundler tool only sees the first bundle due to a
+# bug, so we need to handle this ourselves.
+
+
+UNCOMPRESSED_BUNDLE_MAGIC = b"__CLANG_OFFLOAD_BUNDLE__"
+
+
+def find_bundle_offsets(data: bytes) -> list[int]:
+    """Find offsets of all bundle headers in concatenated data.
+
+    Args:
+        data: Raw fatbin data that may contain multiple concatenated bundles
+
+    Returns:
+        List of byte offsets where bundle headers start
+    """
+    offsets = []
+    pos = 0
+    while True:
+        pos = data.find(UNCOMPRESSED_BUNDLE_MAGIC, pos)
+        if pos == -1:
+            break
+        offsets.append(pos)
+        pos += 1
+    return offsets
+
+
+def parse_concatenated_bundles(data: bytes) -> list[UncompressedBundle]:
+    """Parse all concatenated uncompressed bundles in data.
+
+    Args:
+        data: Raw fatbin data containing one or more concatenated bundles
+
+    Returns:
+        List of parsed UncompressedBundle objects
+
+    Raises:
+        ValueError: If no bundles found or parsing fails
+    """
+    offsets = find_bundle_offsets(data)
+    if not offsets:
+        raise ValueError("No bundle headers found in data")
+
+    bundles = []
+    for i, start in enumerate(offsets):
+        # Slice data from this bundle's start to next bundle (or end)
+        end = offsets[i + 1] if i + 1 < len(offsets) else len(data)
+        bundle_data = data[start:end]
+
+        try:
+            bundle = UncompressedBundle.parse(bundle_data)
+            bundles.append(bundle)
+        except ValueError as e:
+            # Log but continue - some data between bundles might not be valid
+            pass
+
+    return bundles
+
+
+def list_targets_from_concatenated(data: bytes) -> list[str]:
+    """List unique targets from all concatenated bundles.
+
+    Args:
+        data: Raw fatbin data containing one or more concatenated bundles
+
+    Returns:
+        List of unique target triple strings (preserving order of first occurrence)
+    """
+    bundles = parse_concatenated_bundles(data)
+    seen = set()
+    targets = []
+    for bundle in bundles:
+        for triple in bundle.list_triples():
+            if triple not in seen:
+                seen.add(triple)
+                targets.append(triple)
+    return targets
+
+
+@dataclass
+class ExtractedCodeObject:
+    """A code object extracted from a concatenated bundle.
+
+    Attributes:
+        target: Target triple (e.g., "hipv4-amdgcn-amd-amdhsa--gfx1100")
+        data: Raw code object bytes
+        bundle_index: Index of source bundle (0-based)
+    """
+
+    target: str
+    data: bytes
+    bundle_index: int
+
+
+def extract_all_code_objects(data: bytes) -> list[ExtractedCodeObject]:
+    """Extract all code objects from all concatenated bundles.
+
+    Args:
+        data: Raw fatbin data containing one or more concatenated bundles
+
+    Returns:
+        List of ExtractedCodeObject with target, data, and source bundle index
+    """
+    bundles = parse_concatenated_bundles(data)
+    code_objects = []
+
+    for bundle_idx, bundle in enumerate(bundles):
+        for entry in bundle.entries:
+            # Skip host entries (empty or x86 code we don't need)
+            if entry.triple.startswith("host"):
+                continue
+            obj_data = bundle.data[entry.offset : entry.offset + entry.size]
+            code_objects.append(
+                ExtractedCodeObject(
+                    target=entry.triple,
+                    data=obj_data,
+                    bundle_index=bundle_idx,
+                )
+            )
+
+    return code_objects
+
+
+def extract_code_objects_by_target(
+    data: bytes,
+) -> dict[str, list[bytes]]:
+    """Extract code objects grouped by target from concatenated bundles.
+
+    This is the main entry point for the artifact splitter. It handles:
+    - Single bundles (standard case)
+    - Multiple concatenated bundles (RDC/rocRAND case)
+
+    Args:
+        data: Raw fatbin data containing one or more concatenated bundles
+
+    Returns:
+        Dictionary mapping target triple to list of code object bytes
+    """
+    from collections import defaultdict
+
+    extracted = extract_all_code_objects(data)
+    by_target: dict[str, list[bytes]] = defaultdict(list)
+
+    for obj in extracted:
+        by_target[obj.target].append(obj.data)
+
+    return dict(by_target)

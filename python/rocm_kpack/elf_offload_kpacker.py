@@ -6,6 +6,7 @@ This module transforms fat binaries for use with kpack'd device code by:
 2. Mapping .rocm_kpack_ref section to new PT_LOAD segment
 3. Updating __CudaFatBinaryWrapper pointer to reference kpack metadata
 4. Rewriting magic from HIPF to HIPK for runtime detection
+5. Setting bundle index in reserved1 field for multi-TU support
 
 The kpack'd binary contains only:
 - Host code (executable code that runs on CPU)
@@ -13,6 +14,13 @@ The kpack'd binary contains only:
 
 At runtime, the CLR will detect the HIPK magic and load device code from
 .kpack archives instead of trying to use the (now removed) .hip_fatbin section.
+
+Multi-TU Support:
+Libraries built with -fgpu-rdc have multiple __CudaFatBinaryWrapper structures,
+each pointing to a different concatenated bundle in .hip_fatbin. When split:
+- All wrappers point to the same .rocm_kpack_ref metadata
+- Each wrapper's reserved1 field contains its bundle index (0, 1, 2, ...)
+- At runtime, CLR uses this index to load the correct code object
 
 Note: Currently supports 64-bit little-endian ELF (Linux).
 TODO: Windows PE/COFF support will require similar approach with different binary format.
@@ -83,9 +91,13 @@ PT_GNU_EH_FRAME = 0x6474E550
 
 SHT_NULL = 0
 SHT_PROGBITS = 1
+SHT_RELA = 4
 SHT_NOBITS = 8
 
 SHF_ALLOC = 0x2
+
+# Bundle magic (uncompressed)
+UNCOMPRESSED_BUNDLE_MAGIC = b"__CLANG_OFFLOAD_BUNDLE__"
 
 # Dynamic section tags that contain virtual addresses
 DT_NULL = 0
@@ -716,7 +728,12 @@ def _verify_no_fatbin_relocations(
     return problematic
 
 
-def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
+def _rewrite_hipfatbin_magic(
+    data: bytearray,
+    wrapper_bundle_indices: dict[int, int] | None = None,
+    *,
+    verbose: bool = False,
+) -> int:
     """
     Rewrite ALL wrappers in .hipFatBinSegment from HIPF to HIPK.
 
@@ -725,7 +742,7 @@ def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
       Offset 0: magic (4 bytes) - 0x48495046 (HIPF) or 0x4B504948 (HIPK)
       Offset 4: version (4 bytes) - must be 1
       Offset 8: binary pointer (8 bytes) - points to device code
-      Offset 16: dummy1 (8 bytes) - unused
+      Offset 16: reserved1 (8 bytes) - bundle index for multi-TU support
 
     Binaries built with -fgpu-rdc (relocatable device code) have multiple
     wrappers, one per translation unit. Each wrapper is registered by its
@@ -734,9 +751,12 @@ def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
     For kpack'd binaries, we change each wrapper:
       - magic from HIPF to HIPK
       - binary pointer to 0 (will be set by set_pointer() later)
+      - reserved1 to bundle index (for multi-TU disambiguation)
 
     Args:
         data: The ELF binary data to modify in-place
+        wrapper_bundle_indices: Dictionary mapping wrapper vaddr to bundle index.
+            If None or empty, all wrappers get index 0 (single-TU case).
         verbose: If True, print detailed information
 
     Returns:
@@ -781,6 +801,7 @@ def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
 
     # Calculate number of wrappers
     section_offset = hipfatbin_segment_shdr.sh_offset
+    section_vaddr = hipfatbin_segment_shdr.sh_addr
     section_size = hipfatbin_segment_shdr.sh_size
 
     if section_size % WRAPPER_SIZE != 0:
@@ -794,12 +815,18 @@ def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
     if verbose:
         print(f"\n  Rewriting .hipFatBinSegment magic ({num_wrappers} wrapper(s)):")
         print(f"    Section offset: 0x{section_offset:x}")
+        print(f"    Section vaddr: 0x{section_vaddr:x}")
         print(f"    Section size: {section_size} bytes")
+
+    # Default to empty dict if not provided
+    if wrapper_bundle_indices is None:
+        wrapper_bundle_indices = {}
 
     # Transform each wrapper
     transformed = 0
     for i in range(num_wrappers):
         wrapper_offset = section_offset + i * WRAPPER_SIZE
+        wrapper_vaddr = section_vaddr + i * WRAPPER_SIZE
         current_magic = struct.unpack_from("<I", data, wrapper_offset)[0]
 
         if current_magic == HIPK_MAGIC:
@@ -820,11 +847,159 @@ def _rewrite_hipfatbin_magic(data: bytearray, *, verbose: bool = False) -> int:
         # The actual pointer will be set by set_pointer() in kpack_offload_binary()
         struct.pack_into("<Q", data, wrapper_offset + 8, 0)
 
+        # Write bundle index to reserved1 (offset +16)
+        # For single-TU binaries (not in wrapper_bundle_indices), use 0
+        bundle_index = wrapper_bundle_indices.get(wrapper_vaddr, 0)
+        struct.pack_into("<Q", data, wrapper_offset + 16, bundle_index)
+
         transformed += 1
         if verbose:
-            print(f"    Wrapper {i}: HIPF → HIPK at offset 0x{wrapper_offset:x}")
+            print(
+                f"    Wrapper {i}: HIPF → HIPK at offset 0x{wrapper_offset:x}, "
+                f"bundle_index={bundle_index}"
+            )
 
     return transformed
+
+
+def _find_bundle_offsets(data: bytes, fatbin_shdr) -> list[int]:
+    """
+    Find offsets of all concatenated bundles in .hip_fatbin section.
+
+    Multi-TU binaries have multiple __CLANG_OFFLOAD_BUNDLE__ blocks concatenated
+    in the .hip_fatbin section. Each block corresponds to one translation unit.
+
+    Args:
+        data: The ELF binary data
+        fatbin_shdr: Section header for .hip_fatbin
+
+    Returns:
+        List of virtual addresses where bundle headers start, sorted ascending.
+        Returns empty list if no bundles found.
+    """
+    section_data = data[
+        fatbin_shdr.sh_offset : fatbin_shdr.sh_offset + fatbin_shdr.sh_size
+    ]
+
+    offsets = []
+    pos = 0
+    while True:
+        pos = section_data.find(UNCOMPRESSED_BUNDLE_MAGIC, pos)
+        if pos == -1:
+            break
+        # Convert file offset to virtual address
+        vaddr = fatbin_shdr.sh_addr + pos
+        offsets.append(vaddr)
+        pos += 1
+
+    return sorted(offsets)
+
+
+def _read_wrapper_relocation_addends(
+    data: bytes, wrapper_vaddrs: list[int], *, verbose: bool = False
+) -> dict[int, int]:
+    """
+    Read original relocation addends for wrapper binary_ptr fields.
+
+    Each __CudaFatBinaryWrapper has a binary_ptr at offset +8 that is relocated
+    via R_X86_64_RELATIVE. The addend points to the bundle in .hip_fatbin.
+
+    This must be called BEFORE modifying the relocations, as we need the
+    original addends to determine which bundle each wrapper corresponds to.
+
+    Args:
+        data: The ELF binary data
+        wrapper_vaddrs: List of wrapper virtual addresses
+        verbose: Print detailed information
+
+    Returns:
+        Dictionary mapping wrapper_vaddr to original relocation addend (bundle vaddr).
+        Missing entries indicate no relocation found for that wrapper.
+    """
+    try:
+        ehdr = elf_modify_load.read_elf_header(data)
+    except ValueError as e:
+        raise RuntimeError(f"Failed to parse ELF header: {e}") from e
+
+    # Build set of pointer vaddrs we're looking for (binary_ptr at offset +8)
+    target_vaddrs = {vaddr + 8 for vaddr in wrapper_vaddrs}
+
+    # Find RELA sections and search for our relocations
+    addends: dict[int, int] = {}
+
+    for i in range(ehdr.e_shnum):
+        shdr = elf_modify_load.read_section_header(data, ehdr.e_shoff + i * 64)
+
+        if shdr.sh_type != SHT_RELA:
+            continue
+
+        # Parse each relocation entry
+        num_entries = shdr.sh_size // 24  # sizeof(Elf64_Rela) = 24
+
+        for entry_idx in range(num_entries):
+            entry_offset = shdr.sh_offset + entry_idx * 24
+            r_offset, r_info, r_addend = struct.unpack_from("<QQq", data, entry_offset)
+
+            if r_offset in target_vaddrs:
+                # Found a relocation for one of our wrapper pointers
+                # Map back to wrapper vaddr (subtract 8)
+                wrapper_vaddr = r_offset - 8
+                addends[wrapper_vaddr] = r_addend
+
+                if verbose:
+                    reloc_type = r_info & 0xFFFFFFFF
+                    print(
+                        f"    Wrapper 0x{wrapper_vaddr:x} binary_ptr relocation: "
+                        f"addend=0x{r_addend:x} (type={reloc_type})"
+                    )
+
+    return addends
+
+
+def _map_wrapper_bundle_indices(
+    wrapper_addends: dict[int, int],
+    bundle_offsets: list[int],
+    *,
+    verbose: bool = False,
+) -> dict[int, int]:
+    """
+    Map wrapper relocation addends to bundle indices.
+
+    Args:
+        wrapper_addends: Dictionary mapping wrapper_vaddr to relocation addend
+        bundle_offsets: Sorted list of bundle virtual addresses
+        verbose: Print detailed information
+
+    Returns:
+        Dictionary mapping wrapper_vaddr to bundle index (0, 1, 2, ...).
+        The index corresponds to the wrapper's position in the sorted bundle list.
+        Wrappers that can't be mapped (e.g., different relocation type) get index 0.
+    """
+    # Create map from bundle vaddr to index
+    bundle_to_index = {vaddr: idx for idx, vaddr in enumerate(bundle_offsets)}
+
+    wrapper_indices: dict[int, int] = {}
+
+    for wrapper_vaddr, addend in wrapper_addends.items():
+        if addend not in bundle_to_index:
+            # This can happen with non-RELATIVE relocations (e.g., R_X86_64_64)
+            # which require symbol resolution. Don't silently fall back - raise error.
+            raise NotImplementedError(
+                f"Wrapper at 0x{wrapper_vaddr:x} has addend 0x{addend:x} "
+                f"which doesn't match any bundle offset: {[hex(o) for o in bundle_offsets]}. "
+                f"This may be a non-RELATIVE relocation type requiring symbol resolution."
+            )
+
+        bundle_idx = bundle_to_index[addend]
+        wrapper_indices[wrapper_vaddr] = bundle_idx
+
+        if verbose:
+            print(
+                f"    Wrapper 0x{wrapper_vaddr:x} → bundle #{bundle_idx} "
+                f"(offset 0x{addend:x})"
+            )
+
+    return wrapper_indices
 
 
 def kpack_offload_binary(
@@ -931,6 +1106,42 @@ def kpack_offload_binary(
             if verbose:
                 print(f"  Found {num_wrappers} wrapper(s) in .hipFatBinSegment")
 
+            # For multi-TU binaries: capture wrapper→bundle mapping BEFORE modifying relocations
+            # Each wrapper's binary_ptr relocation addend points to its specific bundle
+            wrapper_bundle_indices: dict[int, int] = {}
+            if num_wrappers > 1:
+                if verbose:
+                    print(f"\n  Multi-TU binary detected ({num_wrappers} wrappers)")
+                    print(f"  Mapping wrappers to bundle indices...")
+
+                # Read the mapped binary to analyze relocations
+                mapped_data = temp_mapped.read_bytes()
+
+                # Get all wrapper vaddrs
+                wrapper_vaddrs = [
+                    hipfatbin_segment_vaddr + i * WRAPPER_SIZE
+                    for i in range(num_wrappers)
+                ]
+
+                # Read original relocation addends (pointing to bundles)
+                wrapper_addends = _read_wrapper_relocation_addends(
+                    mapped_data, wrapper_vaddrs, verbose=verbose
+                )
+
+                if wrapper_addends:
+                    # Find bundle offsets in .hip_fatbin
+                    hip_fatbin_shdr = kpacker.hip_fatbin_section
+                    bundle_offsets = _find_bundle_offsets(mapped_data, hip_fatbin_shdr)
+
+                    if verbose:
+                        print(f"  Found {len(bundle_offsets)} bundle(s) in .hip_fatbin")
+
+                    if bundle_offsets:
+                        # Map addends to bundle indices
+                        wrapper_bundle_indices = _map_wrapper_bundle_indices(
+                            wrapper_addends, bundle_offsets, verbose=verbose
+                        )
+
             # Update each wrapper's pointer to point to .rocm_kpack_ref
             # First wrapper: temp_mapped → temp_pointed
             # Subsequent wrappers: temp_pointed → temp_pointed (in-place)
@@ -959,11 +1170,12 @@ def kpack_offload_binary(
                     )
 
             # Rewrite magic HIPF→HIPK for all wrappers
+            # Pass wrapper_bundle_indices to write bundle index to reserved1
             if verbose:
                 print(f"  Rewriting magic (HIPF → HIPK) for {num_wrappers} wrapper(s)")
 
             data = bytearray(temp_pointed.read_bytes())
-            _rewrite_hipfatbin_magic(data, verbose=verbose)
+            _rewrite_hipfatbin_magic(data, wrapper_bundle_indices, verbose=verbose)
             temp_pointed.write_bytes(data)
 
             # Verify no relocations still point into .hip_fatbin

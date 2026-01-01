@@ -315,6 +315,10 @@ class ArtifactSplitter:
             # Create a BundledBinary instance with our toolchain
             binary = BundledBinary(binary_path, toolchain=self.toolchain)
 
+            # Track code object counts per (binary, arch) for RDC with multiple bundles
+            # Key: arch, Value: count of code objects seen so far for this binary+arch
+            code_object_counts: Dict[str, int] = defaultdict(int)
+
             # Extract kernels using context manager
             with binary.unbundle() as unbundled:
                 # Process each unbundled target
@@ -326,13 +330,19 @@ class ArtifactSplitter:
                         # Read kernel data while the file still exists
                         kernel_data = kernel_path.read_bytes()
 
+                        # Build source_binary_relpath with index
+                        # Always use indexed format: "lib/librocrand.so.1.1#0", "#1", etc.
+                        # This matches the bundle_index stored in wrapper reserved1 field
+                        base_relpath = str(binary_path.relative_to(prefix_path))
+                        index = code_object_counts[arch]
+                        code_object_counts[arch] += 1
+                        source_relpath = f"{base_relpath}#{index}"
+
                         # Create ExtractedKernel object
                         extracted_kernel = ExtractedKernel(
                             target_name=target_name,
                             kernel_data=kernel_data,
-                            source_binary_relpath=str(
-                                binary_path.relative_to(prefix_path)
-                            ),
+                            source_binary_relpath=source_relpath,
                             source_prefix=prefix,
                             architecture=arch,
                         )
@@ -555,6 +565,11 @@ class ArtifactSplitter:
                 original_size = binary_path.stat().st_size
 
                 try:
+                    # Compute kernel_name to match TOC key format:
+                    # "{source_prefix}/{source_binary_relpath}" e.g. "math-libs/rocRAND/stage/lib/librocrand.so.1.1"
+                    binary_relpath = binary_path.relative_to(prefix_dir)
+                    kernel_name = f"{prefix}/{binary_relpath}"
+
                     # Add manifest reference marker
                     # Note: add_kpack_ref_marker still uses .rocm_kpack_ref name
                     # but we're using it to add the manifest reference
@@ -562,17 +577,26 @@ class ArtifactSplitter:
                         binary_path=binary_path,
                         output_path=temp_marked,
                         kpack_search_paths=[manifest_relpath],  # Manifest path
-                        kernel_name=self.artifact_prefix,  # Component name instead of binary path
+                        kernel_name=kernel_name,
                         toolchain=self.toolchain,
                     )
 
                     # Transform binary to strip device code
+                    # Write to a new temp file, then rename to break any hardlinks
+                    # (artifact directories may hardlink to stage, and we must not
+                    # corrupt the original stage files)
+                    temp_stripped = binary_path.with_suffix(
+                        binary_path.suffix + ".stripped"
+                    )
                     kpack_offload_binary(
                         input_path=temp_marked,
-                        output_path=binary_path,  # Overwrite original
+                        output_path=temp_stripped,
                         toolchain=self.toolchain,
                         verbose=self.verbose,
                     )
+                    # Atomic rename - creates new inode, breaks hardlink
+                    binary_path.unlink()
+                    temp_stripped.rename(binary_path)
 
                     # Validate output was created
                     if not binary_path.exists():
@@ -598,9 +622,11 @@ class ArtifactSplitter:
                             )
 
                 finally:
-                    # Always clean up temp file
+                    # Always clean up temp files
                     if temp_marked.exists():
                         temp_marked.unlink()
+                    if temp_stripped.exists():
+                        temp_stripped.unlink()
 
     def process_database_files(
         self,
