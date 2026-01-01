@@ -565,25 +565,23 @@ def conservative_zero_page(
                 )
 
             # Piece 3: Aligned region (zero-page)
+            # Extend to cover any unaligned suffix - the suffix is part of the
+            # section being zeroed, so including it in the NOBITS segment is
+            # correct. This avoids creating a separate LOAD segment that would
+            # share the same file offset as the NOBITS segment (which confuses
+            # the dynamic linker).
+            zero_page_vsize = section_end_vaddr - aligned_vaddr
             new_phdrs.append(
                 make_load(
                     aligned_vaddr,
-                    aligned_size,
+                    zero_page_vsize,
                     aligned_offset,
                     0,  # p_filesz=0 for zero-page
                 )
             )
 
-            # Piece 4: Section suffix (if unaligned end)
-            if aligned_end_vaddr < section_end_vaddr:
-                suffix_vsize = section_end_vaddr - aligned_end_vaddr
-                suffix_fsize = suffix_vsize
-                # File offset is now at aligned_offset (shifted down)
-                new_phdrs.append(
-                    make_load(
-                        aligned_end_vaddr, suffix_vsize, aligned_offset, suffix_fsize
-                    )
-                )
+            # Note: No "Piece 4" suffix segment - the suffix is included in
+            # the NOBITS region above.
 
             # Piece 5: After section (if any)
             target_load_end = target_load.p_vaddr + target_load.p_memsz
