@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 
 from rocm_kpack.artifact_scanner import ArtifactScanner, RecognizerRegistry
-from rocm_kpack.binutils import Toolchain, read_kpack_ref_marker
+from rocm_kpack.binutils import Toolchain
 from rocm_kpack.compression import ZstdCompressor
+from rocm_kpack.elf import read_kpack_ref_marker
 from rocm_kpack.kpack import PackedKernelArchive
 from rocm_kpack.packing_visitor import PackingVisitor
 
@@ -141,9 +142,7 @@ def test_packing_visitor_host_only_binaries_have_markers(
     visitor.finalize()
 
     # Check markers on bundled binaries
-    marker1 = read_kpack_ref_marker(
-        output_tree / "bin" / "test_kernel_multi.exe", toolchain=toolchain
-    )
+    marker1 = read_kpack_ref_marker(output_tree / "bin" / "test_kernel_multi.exe")
     assert marker1 is not None
     assert marker1["kernel_name"] == "bin/test_kernel_multi.exe"
     assert "../.kpack/blas-gfx100X.kpack" in marker1["kpack_search_paths"]
@@ -153,16 +152,14 @@ def test_packing_visitor_host_only_binaries_have_markers(
     # Skip this check for now - the marker is present (visible with readelf) but
     # objcopy can't extract it. This is a known limitation.
     # marker2 = read_kpack_ref_marker(
-    #     output_tree / "lib" / "libtest_kernel_single.so", toolchain=toolchain
+    #     output_tree / "lib" / "libtest_kernel_single.so"
     # )
     # assert marker2 is not None
     # assert marker2["kernel_name"] == "lib/libtest_kernel_single.so"
     # assert "../.kpack/blas-gfx100X.kpack" in marker2["kpack_search_paths"]
 
     # Host-only binary should not have marker (was already host-only)
-    marker3 = read_kpack_ref_marker(
-        output_tree / "bin" / "host_only.exe", toolchain=toolchain
-    )
+    marker3 = read_kpack_ref_marker(output_tree / "bin" / "host_only.exe")
     assert marker3 is None
 
 
@@ -344,16 +341,14 @@ def test_packing_visitor_relative_path_from_subdirectory(
     visitor.finalize()
 
     # Binary in bin/ subdirectory should have ../.kpack/... path
-    marker_bin = read_kpack_ref_marker(
-        output_tree / "bin" / "test_kernel_multi.exe", toolchain=toolchain
-    )
+    marker_bin = read_kpack_ref_marker(output_tree / "bin" / "test_kernel_multi.exe")
     assert marker_bin is not None
     assert "../.kpack/test-gfx1100.kpack" in marker_bin["kpack_search_paths"]
 
     # Binary in lib/ subdirectory should also have ../.kpack/... path
     # Note: Skip shared library marker check due to objcopy --dump-section limitation
     # marker_lib = read_kpack_ref_marker(
-    #     output_tree / "lib" / "libtest_kernel_single.so", toolchain=toolchain
+    #     output_tree / "lib" / "libtest_kernel_single.so"
     # )
     # assert marker_lib is not None
     # assert "../.kpack/test-gfx1100.kpack" in marker_lib["kpack_search_paths"]

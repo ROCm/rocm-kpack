@@ -6,8 +6,9 @@ from concurrent.futures import Executor
 from pathlib import Path
 
 from rocm_kpack.artifact_scanner import ArtifactPath, ArtifactVisitor
-from rocm_kpack.binutils import BundledBinary, Toolchain, add_kpack_ref_marker
+from rocm_kpack.binutils import BundledBinary, Toolchain
 from rocm_kpack.database_handlers import DatabaseHandler
+from rocm_kpack.elf import kpack_offload_binary, NotFatBinaryError
 from rocm_kpack.kpack import PackedKernelArchive
 from rocm_kpack.parallel import KernelInput, parallel_prepare_kernels
 
@@ -190,37 +191,22 @@ class PackingVisitor(ArtifactVisitor):
                 [".."] * binary_depth + [".kpack", self.kpack_filename]
             )
 
-        # Add kpack ref marker to original binary FIRST (before kpacking)
-        # This creates a temporary binary with .rocm_kpack_ref section added
-        import tempfile
-
-        with tempfile.NamedTemporaryFile(suffix=".with_marker", delete=False) as tmp:
-            temp_with_marker = Path(tmp.name)
+        # Create host-only binary with kpack reference in a single pass
+        # (adds .rocm_kpack_ref, maps to PT_LOAD, rewrites magic, zero-pages .hip_fatbin)
+        host_only_dest = self.output_root / artifact_path.relative_path
+        host_only_dest.parent.mkdir(parents=True, exist_ok=True)
 
         try:
-            add_kpack_ref_marker(
-                binary_path=bundled_binary.file_path,
-                output_path=temp_with_marker,
+            kpack_offload_binary(
+                input_path=bundled_binary.file_path,
+                output_path=host_only_dest,
                 kpack_search_paths=[kpack_relative_path],
                 kernel_name=artifact_path.relative_path.as_posix(),
-                toolchain=self.toolchain,
             )
-
-            # Create host-only binary (without .hip_fatbin section) from the marked binary
-            # The kpacker will zero-page .hip_fatbin and map .rocm_kpack_ref to PT_LOAD
-            host_only_dest = self.output_root / artifact_path.relative_path
-            host_only_dest.parent.mkdir(parents=True, exist_ok=True)
-
-            from rocm_kpack.elf_offload_kpacker import kpack_offload_binary
-
-            kpack_offload_binary(
-                temp_with_marker, host_only_dest, toolchain=self.toolchain
-            )
-
-        finally:
-            # Clean up temp file
-            if temp_with_marker.exists():
-                temp_with_marker.unlink()
+        except NotFatBinaryError:
+            # Binary was classified as bundled but has no .hip_fatbin
+            # Just copy it as-is
+            shutil.copy2(bundled_binary.file_path, host_only_dest)
 
     def visit_kernel_database(
         self, artifact_path: ArtifactPath, database: DatabaseHandler

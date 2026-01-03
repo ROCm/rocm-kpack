@@ -15,7 +15,7 @@ import argparse
 from pathlib import Path
 import sys
 
-from rocm_kpack.elf_offload_kpacker import kpack_offload_binary
+from rocm_kpack.elf import kpack_offload_binary
 
 
 def run(args: argparse.Namespace):

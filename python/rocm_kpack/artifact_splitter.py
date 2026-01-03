@@ -23,11 +23,11 @@ from rocm_kpack.artifact_utils import (
     scan_directory,
     write_artifact_manifest,
 )
-from rocm_kpack.binutils import BundledBinary, Toolchain, add_kpack_ref_marker
+from rocm_kpack.binutils import BundledBinary, Toolchain
 from rocm_kpack.database_handlers import DatabaseHandler
 from rocm_kpack.kpack import PackedKernelArchive
 from rocm_kpack.compression import ZstdCompressor
-from rocm_kpack.elf_offload_kpacker import kpack_offload_binary
+from rocm_kpack.elf import kpack_offload_binary, NotFatBinaryError
 
 
 @dataclass
@@ -548,31 +548,27 @@ class ArtifactSplitter:
                     )
                     print(f"    Manifest path: {manifest_relpath}")
 
-                # Create temporary file for marked binary
-                temp_marked = binary_path.with_suffix(binary_path.suffix + ".marked")
+                # Create temporary output file
+                temp_output = binary_path.with_suffix(binary_path.suffix + ".kpacked")
 
                 # Record original size for validation
                 original_size = binary_path.stat().st_size
 
                 try:
-                    # Add manifest reference marker
-                    # Note: add_kpack_ref_marker still uses .rocm_kpack_ref name
-                    # but we're using it to add the manifest reference
-                    add_kpack_ref_marker(
-                        binary_path=binary_path,
-                        output_path=temp_marked,
-                        kpack_search_paths=[manifest_relpath],  # Manifest path
-                        kernel_name=self.artifact_prefix,  # Component name instead of binary path
-                        toolchain=self.toolchain,
-                    )
-
-                    # Transform binary to strip device code
+                    # Add manifest reference marker and transform binary in one pass
+                    # (adds .rocm_kpack_ref, maps to PT_LOAD, rewrites magic, zero-pages .hip_fatbin)
                     kpack_offload_binary(
-                        input_path=temp_marked,
-                        output_path=binary_path,  # Overwrite original
-                        toolchain=self.toolchain,
+                        input_path=binary_path,
+                        output_path=temp_output,
+                        kpack_search_paths=[manifest_relpath],  # Manifest path
+                        kernel_name=self.artifact_prefix,  # Component name
                         verbose=self.verbose,
                     )
+
+                    # Remove original first to break hard links, then move temp
+                    # (mode already preserved by kpack_offload_binary)
+                    binary_path.unlink()
+                    shutil.move(temp_output, binary_path)
 
                     # Validate output was created
                     if not binary_path.exists():
@@ -597,10 +593,16 @@ class ArtifactSplitter:
                                 f"(+{size_delta} bytes overhead)"
                             )
 
+                except NotFatBinaryError:
+                    # Binary has no device code - skip silently
+                    if self.verbose:
+                        print(f"    Skipping (no device code)")
+                    continue
+
                 finally:
                     # Always clean up temp file
-                    if temp_marked.exists():
-                        temp_marked.unlink()
+                    if temp_output.exists():
+                        temp_output.unlink()
 
     def process_database_files(
         self,
