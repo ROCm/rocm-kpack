@@ -309,52 +309,50 @@ class BundleBuilder:
         """Build shared library with single architecture."""
         if self.platform == "windows":
             lib_name = "test_kernel_single.dll"
-            shared_flag = "-shared"
         else:
             lib_name = "libtest_kernel_single.so"
-            shared_flag = "-shared"
 
         print(f"\nBuilding: {lib_name} (gfx1100 shared library)")
         output = self.output_dir / lib_name
 
-        return self._run_hipcc(
-            [
-                str(self.kernel_src),
-                "--offload-arch=gfx1100",
-                "-o",
-                str(output),
-                "-fno-gpu-rdc",
-                shared_flag,
-                "-fPIC",
-            ],
-            output,
-        )
+        args = [
+            str(self.kernel_src),
+            "--offload-arch=gfx1100",
+            "-o",
+            str(output),
+            "-fno-gpu-rdc",
+            "-shared",
+        ]
+        # -fPIC is required on Linux but unsupported on Windows
+        if self.platform != "windows":
+            args.append("-fPIC")
+
+        return self._run_hipcc(args, output)
 
     def build_shared_lib_multi_arch(self):
         """Build shared library with multiple architectures."""
         if self.platform == "windows":
             lib_name = "test_kernel_multi.dll"
-            shared_flag = "-shared"
         else:
             lib_name = "libtest_kernel_multi.so"
-            shared_flag = "-shared"
 
         print(f"\nBuilding: {lib_name} (gfx1100,gfx1101 shared library)")
         output = self.output_dir / lib_name
 
-        return self._run_hipcc(
-            [
-                str(self.kernel_src),
-                "--offload-arch=gfx1100",
-                "--offload-arch=gfx1101",
-                "-o",
-                str(output),
-                "-fno-gpu-rdc",
-                shared_flag,
-                "-fPIC",
-            ],
-            output,
-        )
+        args = [
+            str(self.kernel_src),
+            "--offload-arch=gfx1100",
+            "--offload-arch=gfx1101",
+            "-o",
+            str(output),
+            "-fno-gpu-rdc",
+            "-shared",
+        ]
+        # -fPIC is required on Linux but unsupported on Windows
+        if self.platform != "windows":
+            args.append("-fPIC")
+
+        return self._run_hipcc(args, output)
 
     def build_shared_lib_multi_wrapper(self):
         """Build shared library with multiple fat binary wrappers.
@@ -391,10 +389,12 @@ class BundleBuilder:
                 "-c",
                 str(self.multi_wrapper_src1),
                 "--offload-arch=gfx1100",
-                "-fPIC",
                 "-o",
                 str(obj1),
             ]
+            # -fPIC is required on Linux but unsupported on Windows
+            if self.platform != "windows":
+                cmd1.insert(-2, "-fPIC")
             try:
                 subprocess.run(cmd1, check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as e:
@@ -409,10 +409,12 @@ class BundleBuilder:
                 "-c",
                 str(self.multi_wrapper_src2),
                 "--offload-arch=gfx1100",
-                "-fPIC",
                 "-o",
                 str(obj2),
             ]
+            # -fPIC is required on Linux but unsupported on Windows
+            if self.platform != "windows":
+                cmd2.insert(-2, "-fPIC")
             try:
                 subprocess.run(cmd2, check=True, capture_output=True, text=True)
             except subprocess.CalledProcessError as e:
@@ -459,16 +461,17 @@ class BundleBuilder:
         print(f"\nBuilding: {lib_name} (host-only shared library, no GPU code)")
         output = self.output_dir / lib_name
 
-        return self._run_clang(
-            [
-                str(self.host_only_src),
-                "-o",
-                str(output),
-                "-shared",
-                "-fPIC",
-            ],
-            output,
-        )
+        args = [
+            str(self.host_only_src),
+            "-o",
+            str(output),
+            "-shared",
+        ]
+        # -fPIC is required on Linux but unsupported on Windows
+        if self.platform != "windows":
+            args.append("-fPIC")
+
+        return self._run_clang(args, output)
 
     def generate_manifest(self):
         """Generate manifest file documenting the test assets."""
@@ -485,7 +488,7 @@ class BundleBuilder:
                 check=True,
             )
             compiler_version = result.stdout.splitlines()[0]
-        except:
+        except (subprocess.CalledProcessError, OSError):
             compiler_version = "Unknown"
 
         lib_prefix = "" if self.platform == "windows" else "lib"
@@ -617,4 +620,12 @@ def main():
 
 
 if __name__ == "__main__":
+    # Configure Windows console for UTF-8 before any output
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
+    from rocm_kpack.platform_utils import configure_windows_console
+
+    configure_windows_console()
+
     main()

@@ -96,7 +96,8 @@ class TestScanDirectory:
         results = list(scan_directory(tmp_path))
 
         # Check we found all files and directories
-        paths = [str(p.relative_to(tmp_path)) for p, _ in results]
+        # Use as_posix() for consistent forward-slash paths on all platforms
+        paths = [p.relative_to(tmp_path).as_posix() for p, _ in results]
         assert "dir1" in paths
         assert "dir2" in paths
         assert "file3.txt" in paths

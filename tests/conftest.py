@@ -1,6 +1,11 @@
 import pytest
 import pathlib
 
+# Configure Windows console for UTF-8 output before any test output
+from rocm_kpack.platform_utils import configure_windows_console
+
+configure_windows_console()
+
 from rocm_kpack.binutils import Toolchain
 from elf_test_utils import patch_hip_fatbin_size
 
@@ -18,20 +23,36 @@ def test_assets_dir() -> pathlib.Path:
 
 @pytest.fixture(scope="session")
 def toolchain() -> Toolchain:
-    """Provides a Toolchain, using ROCm installation if available."""
-    # Try to find clang-offload-bundler in common ROCm locations
-    potential_paths = [
-        pathlib.Path(
-            "/home/stella/workspace/rocm/gfx1100/lib/llvm/bin/clang-offload-bundler"
-        ),
-        pathlib.Path("/opt/rocm/llvm/bin/clang-offload-bundler"),
-    ]
+    """Provides a Toolchain, using ROCm installation if available.
 
-    for path in potential_paths:
-        if path.exists():
-            return Toolchain(clang_offload_bundler=path)
+    Tool discovery order:
+    1. KPACK_LLVM_BIN environment variable (path to LLVM bin directory)
+    2. System PATH (via shutil.which)
+
+    Set KPACK_LLVM_BIN to your LLVM bin directory if tools aren't on PATH:
+        export KPACK_LLVM_BIN=/opt/rocm/llvm/bin
+    """
+    import os
+    import shutil
+
+    llvm_bin = os.environ.get("KPACK_LLVM_BIN")
+
+    # Check KPACK_LLVM_BIN first
+    if llvm_bin:
+        llvm_bin_path = pathlib.Path(llvm_bin)
+        bundler = llvm_bin_path / "clang-offload-bundler"
+        if not bundler.exists():
+            # Try with .exe extension on Windows
+            bundler = llvm_bin_path / "clang-offload-bundler.exe"
+        if bundler.exists():
+            return Toolchain(clang_offload_bundler=bundler)
 
     # Fall back to system PATH
+    bundler_path = shutil.which("clang-offload-bundler")
+    if bundler_path:
+        return Toolchain(clang_offload_bundler=pathlib.Path(bundler_path))
+
+    # Return default Toolchain - will fail on first tool access with helpful error
     return Toolchain()
 
 
