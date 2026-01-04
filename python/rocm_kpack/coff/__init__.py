@@ -6,6 +6,7 @@ This package provides clean abstractions for PE/COFF surgery operations:
 - surgery: High-level CoffSurgery class for modifications
 - zero_page: Zero-page optimization for removing fatbin content
 - kpack_transform: Full kpack transformation pipeline
+- verify: Structural verification utilities
 
 The design mirrors the rocm_kpack.elf package, adapted for Windows PE/COFF.
 """
@@ -38,6 +39,13 @@ from .kpack_transform import (
     verify_no_fatbin_relocations,
     kpack_offload_binary,
     read_kpack_ref_marker,
+)
+from .verify import (
+    VerificationResult,
+    CoffVerifier,
+    verify_with_llvm_objdump,
+    verify_with_dumpbin,
+    verify_all,
 )
 from .types import (
     # Structs
@@ -124,6 +132,12 @@ __all__ = [
     "verify_no_fatbin_relocations",
     "kpack_offload_binary",
     "read_kpack_ref_marker",
+    # Verification
+    "VerificationResult",
+    "CoffVerifier",
+    "verify_with_llvm_objdump",
+    "verify_with_dumpbin",
+    "verify_all",
     # Structs
     "DosHeader",
     "CoffHeader",
