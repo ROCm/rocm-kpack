@@ -8,6 +8,7 @@ This includes both internal structural checks and external tool invocation.
 """
 
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -403,6 +404,9 @@ def verify_all(
 
     # External tool checks
     result.merge(verify_with_llvm_objdump(path, llvm_objdump))
-    result.merge(verify_with_dumpbin(path))
+
+    # dumpbin is Windows-only (part of MSVC/Windows SDK)
+    if sys.platform == "win32":
+        result.merge(verify_with_dumpbin(path))
 
     return result

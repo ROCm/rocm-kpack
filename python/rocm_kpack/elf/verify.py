@@ -8,6 +8,7 @@ This includes both internal structural checks and external tool invocation.
 """
 
 import subprocess
+import sys
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -508,7 +509,11 @@ def verify_all(path: Path, tmp_dir: Path | None = None) -> VerificationResult:
     # External tool checks
     result.merge(verify_with_readelf(path))
     result.merge(verify_with_strip(path, tmp_dir))
-    result.merge(verify_with_gdb(path))
-    result.merge(verify_with_ldd(path))
+
+    # gdb and ldd are Linux-specific and won't work correctly on Windows
+    # (even if available via MSYS2, they expect Windows binaries)
+    if sys.platform != "win32":
+        result.merge(verify_with_gdb(path))
+        result.merge(verify_with_ldd(path))
 
     return result

@@ -74,7 +74,8 @@ class RocBLASHandler(DatabaseHandler):
         """
         try:
             rel_path = path.relative_to(prefix_root)
-            path_str = str(rel_path)
+            # Use as_posix() for consistent forward-slash paths on all platforms
+            path_str = rel_path.as_posix()
 
             # Check if it's in rocblas/library directory
             if "rocblas/library" not in path_str:
@@ -112,7 +113,8 @@ class HipBLASLtHandler(DatabaseHandler):
         """
         try:
             rel_path = path.relative_to(prefix_root)
-            path_str = str(rel_path)
+            # Use as_posix() for consistent forward-slash paths on all platforms
+            path_str = rel_path.as_posix()
 
             # Check if it's in hipblaslt/library directory
             if "hipblaslt/library" not in path_str:
