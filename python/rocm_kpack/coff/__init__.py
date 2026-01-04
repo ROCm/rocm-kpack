@@ -4,6 +4,8 @@ PE/COFF binary manipulation package for rocm-kpack.
 This package provides clean abstractions for PE/COFF surgery operations:
 - types: Unified PE/COFF struct definitions
 - surgery: High-level CoffSurgery class for modifications
+- zero_page: Zero-page optimization for removing fatbin content
+- kpack_transform: Full kpack transformation pipeline
 
 The design mirrors the rocm_kpack.elf package, adapted for Windows PE/COFF.
 """
@@ -13,6 +15,29 @@ from .surgery import (
     SectionInfo,
     Modification,
     RelocationInfo,
+    AddSectionResult,
+)
+from .zero_page import (
+    ZeroPageResult,
+    calculate_aligned_range,
+    conservative_zero_page,
+    zero_page_section,
+)
+from .kpack_transform import (
+    NotFatBinaryError,
+    HIPF_MAGIC,
+    HIPK_MAGIC,
+    WRAPPER_SIZE,
+    SECTION_HIP_FATBIN_SEGMENT,
+    SECTION_HIP_FATBIN,
+    SECTION_KPACK_REF,
+    ProblematicRelocation,
+    add_kpack_ref_section,
+    rewrite_hipfatbin_magic,
+    update_wrapper_pointers,
+    verify_no_fatbin_relocations,
+    kpack_offload_binary,
+    read_kpack_ref_marker,
 )
 from .types import (
     # Structs
@@ -78,6 +103,27 @@ __all__ = [
     "SectionInfo",
     "Modification",
     "RelocationInfo",
+    "AddSectionResult",
+    # Zero-page
+    "ZeroPageResult",
+    "calculate_aligned_range",
+    "conservative_zero_page",
+    "zero_page_section",
+    # Kpack transform
+    "NotFatBinaryError",
+    "HIPF_MAGIC",
+    "HIPK_MAGIC",
+    "WRAPPER_SIZE",
+    "SECTION_HIP_FATBIN_SEGMENT",
+    "SECTION_HIP_FATBIN",
+    "SECTION_KPACK_REF",
+    "ProblematicRelocation",
+    "add_kpack_ref_section",
+    "rewrite_hipfatbin_magic",
+    "update_wrapper_pointers",
+    "verify_no_fatbin_relocations",
+    "kpack_offload_binary",
+    "read_kpack_ref_marker",
     # Structs
     "DosHeader",
     "CoffHeader",

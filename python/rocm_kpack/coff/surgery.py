@@ -678,3 +678,138 @@ class CoffSurgery:
             end = shdr.VirtualAddress + shdr.VirtualSize
             max_rva = max(max_rva, end)
         return max_rva
+
+    # =========================================================================
+    # Section Addition
+    # =========================================================================
+
+    def add_section(
+        self,
+        name: str,
+        content: bytes,
+        characteristics: int = IMAGE_SCN_MEM_READ | IMAGE_SCN_CNT_INITIALIZED_DATA,
+    ) -> "AddSectionResult":
+        """Add a new section to the PE binary.
+
+        This appends the section content to the end of the file and adds
+        a new section header. The new section gets the next available RVA.
+
+        Steps:
+        1. Check space exists for new section header
+        2. Append section content to end of file (aligned to FileAlignment)
+        3. Calculate RVA (next available, aligned to SectionAlignment)
+        4. Add new section header entry
+        5. Update NumberOfSections and SizeOfImage
+
+        Args:
+            name: Section name (max 8 chars, will be truncated)
+            content: Section content bytes
+            characteristics: IMAGE_SCN_* flags (default: readable initialized data)
+
+        Returns:
+            AddSectionResult with section details
+
+        Raises:
+            ValueError: If section already exists or no space for new header
+        """
+        # Check if section already exists
+        truncated_name = name[:8]
+        if self.find_section(truncated_name) is not None:
+            raise ValueError(f"Section '{truncated_name}' already exists")
+
+        # Check space for new section header
+        headers_end = self._get_section_headers_offset() + (
+            self._coff_hdr.NumberOfSections * SECTION_HEADER_SIZE
+        )
+        new_header_end = headers_end + SECTION_HEADER_SIZE
+
+        if new_header_end > self._opt_hdr.SizeOfHeaders:
+            raise ValueError(
+                f"No space for new section header. "
+                f"Headers end at 0x{new_header_end:x}, "
+                f"SizeOfHeaders is 0x{self._opt_hdr.SizeOfHeaders:x}. "
+                f"Need {new_header_end - self._opt_hdr.SizeOfHeaders} more bytes."
+            )
+
+        # Step 1: Calculate file offset for new section (aligned to FileAlignment)
+        current_end = self.get_max_section_end_offset()
+        file_offset = round_up_to_alignment(current_end, self.file_alignment)
+
+        # Step 2: Calculate RVA for new section (aligned to SectionAlignment)
+        current_max_rva = self.get_max_section_end_rva()
+        rva = round_up_to_alignment(current_max_rva, self.section_alignment)
+
+        # Step 3: Prepare content (pad to FileAlignment)
+        raw_size = round_up_to_alignment(len(content), self.file_alignment)
+        padded_content = content + (b"\x00" * (raw_size - len(content)))
+
+        # Step 4: Extend file with padding + content
+        padding_needed = file_offset - len(self._data)
+        if padding_needed > 0:
+            self._data.extend(b"\x00" * padding_needed)
+        self._data.extend(padded_content)
+
+        # Step 5: Create section header
+        new_shdr = SectionHeader(
+            Name=section_name_to_bytes(truncated_name),
+            VirtualSize=len(content),  # Actual size, not padded
+            VirtualAddress=rva,
+            SizeOfRawData=raw_size,
+            PointerToRawData=file_offset,
+            PointerToRelocations=0,
+            PointerToLinenumbers=0,
+            NumberOfRelocations=0,
+            NumberOfLinenumbers=0,
+            Characteristics=characteristics,
+        )
+
+        # Step 6: Write section header to file
+        new_shdr.write_to(self._data, headers_end)
+        self._sections.append(new_shdr)
+
+        # Step 7: Update COFF header (NumberOfSections)
+        self._coff_hdr = CoffHeader(
+            Machine=self._coff_hdr.Machine,
+            NumberOfSections=self._coff_hdr.NumberOfSections + 1,
+            TimeDateStamp=self._coff_hdr.TimeDateStamp,
+            PointerToSymbolTable=self._coff_hdr.PointerToSymbolTable,
+            NumberOfSymbols=self._coff_hdr.NumberOfSymbols,
+            SizeOfOptionalHeader=self._coff_hdr.SizeOfOptionalHeader,
+            Characteristics=self._coff_hdr.Characteristics,
+        )
+        self.update_coff_header()
+
+        # Step 8: Update SizeOfImage in optional header
+        # SizeOfImage must include the new section, aligned to SectionAlignment
+        new_max_rva = rva + round_up_to_alignment(len(content), self.section_alignment)
+        self._opt_hdr.SizeOfImage = new_max_rva
+        self.update_optional_header()
+
+        self._modifications.append(
+            Modification(
+                operation="add_section",
+                file_offset=file_offset,
+                size=raw_size,
+                description=f"add section '{truncated_name}' at RVA 0x{rva:x}",
+            )
+        )
+
+        return AddSectionResult(
+            success=True,
+            section_index=len(self._sections) - 1,
+            rva=rva,
+            file_offset=file_offset,
+            size=len(content),
+        )
+
+
+@dataclass
+class AddSectionResult:
+    """Result of adding a section."""
+
+    success: bool
+    section_index: int
+    rva: int
+    file_offset: int
+    size: int
+    error: str | None = None
