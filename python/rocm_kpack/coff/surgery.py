@@ -397,9 +397,7 @@ class CoffSurgery:
             )
         )
 
-    def write_bytes_at_rva(
-        self, rva: int, data: bytes, description: str = ""
-    ) -> None:
+    def write_bytes_at_rva(self, rva: int, data: bytes, description: str = "") -> None:
         """Write bytes at an RVA.
 
         Args:
@@ -448,9 +446,7 @@ class CoffSurgery:
 
         return struct.unpack_from("<Q", self._data, offset)[0]
 
-    def write_pointer_at_rva(
-        self, rva: int, value: int, description: str = ""
-    ) -> None:
+    def write_pointer_at_rva(self, rva: int, value: int, description: str = "") -> None:
         """Write an 8-byte pointer at an RVA.
 
         Args:
