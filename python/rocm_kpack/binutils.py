@@ -28,16 +28,19 @@ class Toolchain:
         *,
         clang_offload_bundler: Path | None = None,
         objcopy: Path | None = None,
+        objdump: Path | None = None,
         readelf: Path | None = None,
     ):
         # Store explicit paths (may be None)
         self._clang_offload_bundler_path = clang_offload_bundler
         self._objcopy_path = objcopy
+        self._objdump_path = objdump
         self._readelf_path = readelf
 
         # Cached resolved paths
         self._clang_offload_bundler_cached: Path | None = None
         self._objcopy_cached: Path | None = None
+        self._objdump_cached: Path | None = None
         self._readelf_cached: Path | None = None
 
     @staticmethod
@@ -57,13 +60,57 @@ class Toolchain:
         if explicit_path is None:
             found_path = shutil.which(tool_file_name)
             if found_path is None:
-                raise OSError(f"Could not file tool '{tool_file_name}' on system path")
+                raise OSError(
+                    f"Could not find tool '{tool_file_name}' on system path. "
+                    f"Set KPACK_LLVM_BIN to your LLVM bin directory."
+                )
             explicit_path = Path(found_path)
         if not explicit_path.exists():
             raise OSError(
                 f"Tool '{tool_file_name}' at path {explicit_path} does not exist"
             )
         return explicit_path
+
+    def _validate_or_find_with_fallback(
+        self,
+        tool_file_name: str,
+        fallback_name: str,
+        explicit_path: Path | None,
+    ) -> Path:
+        """Find a tool, trying fallback name if primary not found.
+
+        Args:
+            tool_file_name: Primary tool name (e.g., "objdump")
+            fallback_name: Fallback tool name (e.g., "llvm-objdump")
+            explicit_path: Explicit path if provided by user
+
+        Returns:
+            Path to found tool
+
+        Raises:
+            OSError: If neither tool can be found
+        """
+        if explicit_path is not None:
+            if not explicit_path.exists():
+                raise OSError(
+                    f"Tool '{tool_file_name}' at path {explicit_path} does not exist"
+                )
+            return explicit_path
+
+        # Try primary name first
+        found_path = shutil.which(tool_file_name)
+        if found_path is not None:
+            return Path(found_path)
+
+        # Try fallback name
+        found_path = shutil.which(fallback_name)
+        if found_path is not None:
+            return Path(found_path)
+
+        raise OSError(
+            f"Could not find tool '{tool_file_name}' or '{fallback_name}' on system path. "
+            f"Set KPACK_LLVM_BIN to your LLVM bin directory."
+        )
 
     @property
     def clang_offload_bundler(self) -> Path:
@@ -87,6 +134,20 @@ class Toolchain:
         if self._readelf_cached is None:
             self._readelf_cached = self._validate_or_find("readelf", self._readelf_path)
         return self._readelf_cached
+
+    @property
+    def objdump(self) -> Path:
+        """Get objdump path (lazy, cached).
+
+        Tries 'objdump' first, falls back to 'llvm-objdump' if not found.
+        This allows the same code to work on Linux (GNU objdump) and
+        Windows (LLVM objdump from ROCm).
+        """
+        if self._objdump_cached is None:
+            self._objdump_cached = self._validate_or_find_with_fallback(
+                "objdump", "llvm-objdump", self._objdump_path
+            )
+        return self._objdump_cached
 
     def exec_capture_text(self, args: list[str | Path]):
         return subprocess.check_output(
