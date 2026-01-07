@@ -18,9 +18,9 @@ from .surgery import (
     RelocationInfo,
     AddSectionResult,
 )
+from ..verify import VerificationResult
 from .verify import (
     ElfVerifier,
-    VerificationResult,
     verify_with_readelf,
     verify_with_strip,
     verify_with_gdb,

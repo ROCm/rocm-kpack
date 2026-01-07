@@ -8,72 +8,22 @@ This includes both internal structural checks and external tool invocation.
 """
 
 import subprocess
+import sys
 import tempfile
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from ..verify import VerificationResult, BinaryVerifier
 from .types import (
-    ElfHeader,
-    ProgramHeader,
-    SectionHeader,
     PT_LOAD,
     PT_PHDR,
-    SHT_STRTAB,
     SHT_NOBITS,
-    SHF_ALLOC,
-    ELF64_PHDR_SIZE,
     PAGE_SIZE,
 )
-from .surgery import ElfSurgery
+from .surgery import ElfSurgery, ProgramHeader
 
 
-@dataclass
-class VerificationResult:
-    """Result of ELF verification."""
-
-    passed: bool = True
-    errors: list[str] = field(default_factory=list)
-    warnings: list[str] = field(default_factory=list)
-
-    def add_error(self, msg: str) -> None:
-        """Add an error (verification failed)."""
-        self.errors.append(msg)
-        self.passed = False
-
-    def add_warning(self, msg: str) -> None:
-        """Add a warning (verification passed but with concerns)."""
-        self.warnings.append(msg)
-
-    def merge(self, other: "VerificationResult") -> None:
-        """Merge another result into this one."""
-        if not other.passed:
-            self.passed = False
-        self.errors.extend(other.errors)
-        self.warnings.extend(other.warnings)
-
-    def __str__(self) -> str:
-        """Human-readable summary."""
-        lines = []
-        if self.passed:
-            lines.append("Verification PASSED")
-        else:
-            lines.append("Verification FAILED")
-
-        if self.errors:
-            lines.append(f"Errors ({len(self.errors)}):")
-            for e in self.errors:
-                lines.append(f"  - {e}")
-
-        if self.warnings:
-            lines.append(f"Warnings ({len(self.warnings)}):")
-            for w in self.warnings:
-                lines.append(f"  - {w}")
-
-        return "\n".join(lines)
-
-
-class ElfVerifier:
+class ElfVerifier(BinaryVerifier):
     """ELF binary verification.
 
     Checks for common structural issues that cause problems at runtime
@@ -508,7 +458,11 @@ def verify_all(path: Path, tmp_dir: Path | None = None) -> VerificationResult:
     # External tool checks
     result.merge(verify_with_readelf(path))
     result.merge(verify_with_strip(path, tmp_dir))
-    result.merge(verify_with_gdb(path))
-    result.merge(verify_with_ldd(path))
+
+    # gdb and ldd are Linux-specific and won't work correctly on Windows
+    # (even if available via MSYS2, they expect Windows binaries)
+    if sys.platform != "win32":
+        result.merge(verify_with_gdb(path))
+        result.merge(verify_with_ldd(path))
 
     return result

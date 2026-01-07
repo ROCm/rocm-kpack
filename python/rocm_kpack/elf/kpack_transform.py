@@ -18,20 +18,11 @@ from pathlib import Path
 
 import msgpack
 
+from ..kpack_transform import NotFatBinaryError
 from .surgery import ElfSurgery, SectionInfo, AddSectionResult
 from .operations import map_section_to_load, set_pointer
 from .zero_page import conservative_zero_page
 from .types import SHT_PROGBITS
-
-
-class NotFatBinaryError(ValueError):
-    """Raised when kpack_offload_binary is called on a binary without device code.
-
-    This is not necessarily an error condition - callers should catch this
-    and skip processing for non-fat binaries.
-    """
-
-    pass
 
 
 # Constants for __CudaFatBinaryWrapper structures
