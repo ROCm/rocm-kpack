@@ -237,6 +237,13 @@ kpack_discover_binary_path(const void* address_in_binary, char* path_out,
 // list until a match is found. This ensures the highest-priority architecture
 // is used even if it's only available in a later archive.
 //
+// Multi-TU Support:
+// Libraries built with -fgpu-rdc have multiple __CudaFatBinaryWrapper
+// structures, each corresponding to a different translation unit (TU). The
+// co_index parameter identifies which code object to load (0-based). At build
+// time, the kpack tooling assigns each code object an index and stores this
+// in the wrapper's reserved1 field. At runtime, CLR passes this index through.
+//
 // Thread Safety:
 // - Thread-safe when called with the same cache from multiple threads
 // - Archives are cached and reused across calls
@@ -247,6 +254,8 @@ kpack_discover_binary_path(const void* address_in_binary, char* path_out,
 //                  __CudaFatBinaryWrapper.binary when magic is HIPK)
 //   binary_path: Path to the binary containing the HIPK metadata (used to
 //                resolve relative kpack paths)
+//   co_index: Code object index for multi-TU binaries (from wrapper reserved1
+//             field). Use 0 for single-TU binaries.
 //   arch_list: Array of architecture strings in priority order
 //              (e.g., ["gfx942:xnack+", "gfx9-4-generic:xnack+"])
 //   arch_count: Number of entries in arch_list
@@ -266,8 +275,8 @@ kpack_discover_binary_path(const void* address_in_binary, char* path_out,
 //   KPACK_ERROR_NOT_IMPLEMENTED if ROCM_KPACK_DISABLE was set at cache creation
 KPACK_API kpack_error_t kpack_load_code_object(
     kpack_cache_t cache, const void* hipk_metadata, const char* binary_path,
-    const char* const* arch_list, size_t arch_count, void** code_object_out,
-    size_t* code_object_size_out);
+    uint32_t co_index, const char* const* arch_list, size_t arch_count,
+    void** code_object_out, size_t* code_object_size_out);
 
 // Free a code object allocated by kpack_load_code_object
 //

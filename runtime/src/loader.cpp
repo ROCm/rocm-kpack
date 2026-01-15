@@ -240,6 +240,7 @@ void kpack_cache_destroy(kpack_cache_t cache) {
 kpack_error_t kpack_load_code_object(kpack_cache_t cache,
                                      const void* hipk_metadata,
                                      const char* binary_path,
+                                     uint32_t co_index,
                                      const char* const* arch_list,
                                      size_t arch_count, void** code_object_out,
                                      size_t* code_object_size_out) {
@@ -269,8 +270,18 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
     return err;
   }
 
-  KPACK_DEBUG(cache, "parsed HIPK metadata: kernel_name='%s', %zu search paths",
-              kernel_name.c_str(), embedded_search_paths.size());
+  // Construct lookup key: kernel_name with optional index suffix for multi-TU
+  // The TOC stores entries as "lib/foo.so#0", "lib/foo.so#1", etc.
+  std::string lookup_key = kernel_name;
+  if (co_index > 0) {
+    lookup_key += "#" + std::to_string(co_index);
+  }
+
+  KPACK_DEBUG(cache,
+              "parsed HIPK metadata: kernel_name='%s', co_index=%u, "
+              "lookup_key='%s', %zu search paths",
+              kernel_name.c_str(), co_index, lookup_key.c_str(),
+              embedded_search_paths.size());
 
   // Build final search paths list
   std::vector<std::string> search_paths;
@@ -398,7 +409,8 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
     }
 
     // Fetch kernel - kpack_get_kernel() is thread-safe and allocates result
-    err = kpack_get_kernel(archive, kernel_name.c_str(), arch, &kernel_data,
+    // Use lookup_key which includes the co_index suffix for multi-TU binaries
+    err = kpack_get_kernel(archive, lookup_key.c_str(), arch, &kernel_data,
                            &kernel_size);
     if (err == KPACK_SUCCESS) {
       KPACK_DEBUG(cache, "  found kernel: %zu bytes", kernel_size);
