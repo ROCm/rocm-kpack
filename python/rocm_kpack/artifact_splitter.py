@@ -315,6 +315,10 @@ class ArtifactSplitter:
             # Create a BundledBinary instance with our toolchain
             binary = BundledBinary(binary_path, toolchain=self.toolchain)
 
+            # Track code object index per (binary, arch) for multi-TU support
+            # Each TU in a -fgpu-rdc binary gets a unique index
+            code_object_index: Dict[str, int] = defaultdict(int)
+
             # Extract kernels using context manager
             with binary.unbundle() as unbundled:
                 # Process each unbundled target
@@ -326,13 +330,19 @@ class ArtifactSplitter:
                         # Read kernel data while the file still exists
                         kernel_data = kernel_path.read_bytes()
 
+                        # Build source_binary_relpath with index suffix
+                        # TOC always uses indexed format: "lib/foo.so#0", "lib/foo.so#1"
+                        # This matches the co_index in wrapper's reserved1 field
+                        base_relpath = str(binary_path.relative_to(prefix_path))
+                        index = code_object_index[arch]
+                        code_object_index[arch] += 1
+                        indexed_relpath = f"{base_relpath}#{index}"
+
                         # Create ExtractedKernel object
                         extracted_kernel = ExtractedKernel(
                             target_name=target_name,
                             kernel_data=kernel_data,
-                            source_binary_relpath=str(
-                                binary_path.relative_to(prefix_path)
-                            ),
+                            source_binary_relpath=indexed_relpath,
                             source_prefix=prefix,
                             architecture=arch,
                         )
@@ -340,7 +350,7 @@ class ArtifactSplitter:
                         kernels_by_arch[arch].append(extracted_kernel)
                         if self.verbose:
                             print(
-                                f"    Extracted kernel for {arch}: {file_name} ({len(kernel_data)} bytes)"
+                                f"    Extracted kernel for {arch}: {file_name} -> {indexed_relpath} ({len(kernel_data)} bytes)"
                             )
 
         return kernels_by_arch
@@ -555,13 +565,19 @@ class ArtifactSplitter:
                 original_size = binary_path.stat().st_size
 
                 try:
+                    # Compute kernel_name to match TOC key format (without index):
+                    # "{prefix}/{binary_relpath}" e.g. "rocrand/lib/librocrand.so.1.1"
+                    # Runtime appends "#N" based on wrapper's reserved1 (co_index)
+                    binary_relpath = binary_path.relative_to(prefix_dir)
+                    kernel_name = f"{prefix}/{binary_relpath}"
+
                     # Add manifest reference marker and transform binary in one pass
                     # (adds .rocm_kpack_ref, maps to PT_LOAD, rewrites magic, zero-pages .hip_fatbin)
                     kpack_offload_binary(
                         input_path=binary_path,
                         output_path=temp_output,
                         kpack_search_paths=[manifest_relpath],  # Manifest path
-                        kernel_name=self.artifact_prefix,  # Component name
+                        kernel_name=kernel_name,
                         verbose=self.verbose,
                     )
 

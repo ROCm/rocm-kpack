@@ -116,9 +116,15 @@ def rewrite_hipfatbin_magic(
     - offset 0: magic (4 bytes) - HIPF or HIPK
     - offset 4: version (4 bytes)
     - offset 8: binary pointer (8 bytes)
-    - offset 16: filename pointer (8 bytes)
+    - offset 16: reserved1 (8 bytes) - used for co_index in kpack'd binaries
 
-    This function rewrites the magic from HIPF to HIPK for all wrappers.
+    This function:
+    1. Rewrites magic from HIPF to HIPK for all wrappers
+    2. Writes wrapper index to reserved1 for multi-TU support
+
+    For multi-TU binaries (built with -fgpu-rdc), each wrapper corresponds to
+    a different translation unit. The index stored in reserved1 tells CLR
+    which code object to request from the kpack archive at runtime.
 
     Args:
         surgery: CoffSurgery instance to operate on
@@ -183,6 +189,10 @@ def rewrite_hipfatbin_magic(
 
         # Transform: HIPF -> HIPK
         struct.pack_into("<I", surgery.data, wrapper_offset, HIPK_MAGIC)
+
+        # Write wrapper index to reserved1 (offset +16) for multi-TU support
+        # CLR uses this as co_index to look up the correct kernel in kpack
+        struct.pack_into("<I", surgery.data, wrapper_offset + 16, i)
 
         transformed += 1
         if verbose:

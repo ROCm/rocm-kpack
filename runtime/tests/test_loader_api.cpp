@@ -184,8 +184,8 @@ TEST(LoaderAPITest, LoadCodeObject_NullCache) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(nullptr, "test", "/nonexistent/binary.so",
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(nullptr, "test", "/nonexistent/binary.so", 0,
+                             arch_list, 1, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -198,8 +198,8 @@ TEST(LoaderAPITest, LoadCodeObject_NullMetadata) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), nullptr, "/nonexistent/binary.so",
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), nullptr, "/nonexistent/binary.so", 0,
+                             arch_list, 1, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -212,8 +212,8 @@ TEST(LoaderAPITest, LoadCodeObject_NullBinaryPath) {
   void* code_object = nullptr;
   size_t size = 0;
 
-  kpack_error_t err = kpack_load_code_object(cache.get(), metadata, nullptr,
-                                             0, arch_list, 1, &code_object, &size);
+  kpack_error_t err = kpack_load_code_object(cache.get(), metadata, nullptr, 0,
+                                             arch_list, 1, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -226,8 +226,8 @@ TEST(LoaderAPITest, LoadCodeObject_NullArchList) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so",
-                             0, nullptr, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so", 0,
+                             nullptr, 1, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -241,8 +241,8 @@ TEST(LoaderAPITest, LoadCodeObject_ZeroArchCount) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so",
-                             0, arch_list, 0, &code_object, &size);
+      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so", 0,
+                             arch_list, 0, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -255,8 +255,8 @@ TEST(LoaderAPITest, LoadCodeObject_NullCodeObjectOut) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so",
-                             0, arch_list, 1, nullptr, &size);
+      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so", 0,
+                             arch_list, 1, nullptr, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -269,8 +269,8 @@ TEST(LoaderAPITest, LoadCodeObject_NullSizeOut) {
   void* code_object = nullptr;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so",
-                             0, arch_list, 1, &code_object, nullptr);
+      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so", 0,
+                             arch_list, 1, &code_object, nullptr);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_ARGUMENT);
 }
 
@@ -285,8 +285,8 @@ TEST(LoaderAPITest, LoadCodeObject_InvalidMetadata) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so",
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so", 0,
+                             arch_list, 1, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_INVALID_METADATA);
 }
 
@@ -403,8 +403,8 @@ TEST(LoaderAPITest, LoadCodeObject_DisabledViaEnv) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so",
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), metadata, "/nonexistent/binary.so", 0,
+                             arch_list, 1, &code_object, &size);
   EXPECT_EQ(err, KPACK_ERROR_NOT_IMPLEMENTED);
 }
 
@@ -718,9 +718,9 @@ TEST(LoaderAPITest, ThreadSafety_ConcurrentLoadCodeObject) {
       void* code_object = nullptr;
       size_t size = 0;
 
-      kpack_error_t err = kpack_load_code_object(cache.get(), metadata.data(),
-                                                 binary_path.c_str(), 0,
-                                                 arch_list, 1, &code_object, &size);
+      kpack_error_t err = kpack_load_code_object(
+          cache.get(), metadata.data(), binary_path.c_str(), 0, arch_list, 1,
+          &code_object, &size);
 
       if (err == KPACK_SUCCESS && code_object != nullptr &&
           std::memcmp(code_object, expected_prefix, 19) == 0) {
@@ -770,9 +770,9 @@ TEST(LoaderAPITest, ThreadSafety_ConcurrentArchiveCaching) {
     void* code_object = nullptr;
     size_t size = 0;
 
-    kpack_error_t err = kpack_load_code_object(cache.get(), metadata.data(),
-                                               binary_path.c_str(), 0,
-                                               arch_list, 1, &code_object, &size);
+    kpack_error_t err = kpack_load_code_object(
+        cache.get(), metadata.data(), binary_path.c_str(), 0, arch_list, 1,
+        &code_object, &size);
 
     if (err == KPACK_SUCCESS) {
       success_count++;
@@ -818,7 +818,7 @@ TEST(ArchiveIntegrationTest, ThreadSafety_ConcurrentGetKernel) {
   auto worker = [&](int thread_id) {
     // Each thread alternates between different binary/arch combinations
     const char* binary =
-        (thread_id % 2 == 0) ? "lib/libtest.so" : "bin/testapp";
+        (thread_id % 2 == 0) ? "lib/libtest.so#0" : "bin/testapp#0";
     const char* arch = "gfx900";
     const char* expected_prefix =
         (thread_id % 2 == 0) ? "KERNEL1_GFX900_DATA" : "KERNEL3_APP_GFX900";
@@ -885,8 +885,8 @@ TEST(LoaderAPITest, HIPKMetadata_MissingKernelName) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(),
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(), 0,
+                             arch_list, 1, &code_object, &size);
 
   EXPECT_EQ(err, KPACK_ERROR_INVALID_METADATA);
   EXPECT_EQ(code_object, nullptr);
@@ -914,8 +914,8 @@ TEST(LoaderAPITest, HIPKMetadata_MissingSearchPaths) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(),
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(), 0,
+                             arch_list, 1, &code_object, &size);
 
   EXPECT_EQ(err, KPACK_ERROR_INVALID_METADATA);
   EXPECT_EQ(code_object, nullptr);
@@ -970,8 +970,8 @@ TEST(LoaderAPITest, HIPKMetadata_WrongTypeKernelName) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(),
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(), 0,
+                             arch_list, 1, &code_object, &size);
 
   EXPECT_EQ(err, KPACK_ERROR_INVALID_METADATA);
   EXPECT_EQ(code_object, nullptr);
@@ -1001,8 +1001,8 @@ TEST(LoaderAPITest, HIPKMetadata_WrongTypeSearchPaths) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(),
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(), 0,
+                             arch_list, 1, &code_object, &size);
 
   EXPECT_EQ(err, KPACK_ERROR_INVALID_METADATA);
   EXPECT_EQ(code_object, nullptr);
@@ -1028,8 +1028,8 @@ TEST(LoaderAPITest, HIPKMetadata_NotAMap) {
   size_t size = 0;
 
   kpack_error_t err =
-      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(),
-                             0, arch_list, 1, &code_object, &size);
+      kpack_load_code_object(cache.get(), sbuf.data(), binary_path.c_str(), 0,
+                             arch_list, 1, &code_object, &size);
 
   EXPECT_EQ(err, KPACK_ERROR_INVALID_METADATA);
   EXPECT_EQ(code_object, nullptr);

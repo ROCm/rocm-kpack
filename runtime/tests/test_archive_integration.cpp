@@ -41,28 +41,28 @@ TEST(ArchiveIntegrationTest, NoOpArchive) {
   size_t binary_count;
   err = kpack_get_binary_count(archive, &binary_count);
   ASSERT_EQ(err, KPACK_SUCCESS);
-  EXPECT_EQ(binary_count, 2);  // lib/libtest.so, bin/testapp
+  EXPECT_EQ(binary_count, 2);  // lib/libtest.so#0, bin/testapp#0
 
-  // Load and verify kernel 1: lib/libtest.so @ gfx900
+  // Load and verify kernel 1: lib/libtest.so#0 @ gfx900
   void* kernel_data;
   size_t kernel_size;
-  err = kpack_get_kernel(archive, "lib/libtest.so", "gfx900", &kernel_data,
+  err = kpack_get_kernel(archive, "lib/libtest.so#0", "gfx900", &kernel_data,
                          &kernel_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel_size, 119);
   EXPECT_EQ(0, memcmp(kernel_data, "KERNEL1_GFX900_DATA", 19));
   kpack_free_kernel(kernel_data);
 
-  // Load and verify kernel 2: lib/libtest.so @ gfx906
-  err = kpack_get_kernel(archive, "lib/libtest.so", "gfx906", &kernel_data,
+  // Load and verify kernel 2: lib/libtest.so#0 @ gfx906
+  err = kpack_get_kernel(archive, "lib/libtest.so#0", "gfx906", &kernel_data,
                          &kernel_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel_size, 219);
   EXPECT_EQ(0, memcmp(kernel_data, "KERNEL2_GFX906_DATA", 19));
   kpack_free_kernel(kernel_data);
 
-  // Load and verify kernel 3: bin/testapp @ gfx900
-  err = kpack_get_kernel(archive, "bin/testapp", "gfx900", &kernel_data,
+  // Load and verify kernel 3: bin/testapp#0 @ gfx900
+  err = kpack_get_kernel(archive, "bin/testapp#0", "gfx900", &kernel_data,
                          &kernel_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel_size, 168);
@@ -74,7 +74,7 @@ TEST(ArchiveIntegrationTest, NoOpArchive) {
                          &kernel_size);
   EXPECT_EQ(err, KPACK_ERROR_KERNEL_NOT_FOUND);
 
-  err = kpack_get_kernel(archive, "lib/libtest.so", "gfx908", &kernel_data,
+  err = kpack_get_kernel(archive, "lib/libtest.so#0", "gfx908", &kernel_data,
                          &kernel_size);
   EXPECT_EQ(err, KPACK_ERROR_KERNEL_NOT_FOUND);
 
@@ -112,28 +112,28 @@ TEST(ArchiveIntegrationTest, ZstdArchive) {
   size_t binary_count;
   err = kpack_get_binary_count(archive, &binary_count);
   ASSERT_EQ(err, KPACK_SUCCESS);
-  EXPECT_EQ(binary_count, 2);  // lib/libhip.so, bin/hiptest
+  EXPECT_EQ(binary_count, 2);  // lib/libhip.so#0, bin/hiptest#0
 
-  // Load and verify kernel 1: lib/libhip.so @ gfx1100
+  // Load and verify kernel 1: lib/libhip.so#0 @ gfx1100
   void* kernel_data;
   size_t kernel_size;
-  err = kpack_get_kernel(archive, "lib/libhip.so", "gfx1100", &kernel_data,
+  err = kpack_get_kernel(archive, "lib/libhip.so#0", "gfx1100", &kernel_data,
                          &kernel_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel_size, 1019);
   EXPECT_EQ(0, memcmp(kernel_data, "HIP_KERNEL_GFX1100_", 19));
   kpack_free_kernel(kernel_data);
 
-  // Load and verify kernel 2: lib/libhip.so @ gfx1101
-  err = kpack_get_kernel(archive, "lib/libhip.so", "gfx1101", &kernel_data,
+  // Load and verify kernel 2: lib/libhip.so#0 @ gfx1101
+  err = kpack_get_kernel(archive, "lib/libhip.so#0", "gfx1101", &kernel_data,
                          &kernel_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel_size, 619);
   EXPECT_EQ(0, memcmp(kernel_data, "HIP_KERNEL_GFX1101_", 19));
   kpack_free_kernel(kernel_data);
 
-  // Load and verify kernel 3: bin/hiptest @ gfx1100
-  err = kpack_get_kernel(archive, "bin/hiptest", "gfx1100", &kernel_data,
+  // Load and verify kernel 3: bin/hiptest#0 @ gfx1100
+  err = kpack_get_kernel(archive, "bin/hiptest#0", "gfx1100", &kernel_data,
                          &kernel_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel_size, 1018);
@@ -160,17 +160,17 @@ TEST(ArchiveIntegrationTest, GetBinaryNames) {
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(binary_count, 2u);
 
-  // Get binary 0 (expected: bin/testapp based on alphabetical ordering)
+  // Get binary 0 (expected: bin/testapp#0 based on alphabetical ordering)
   const char* binary0;
   err = kpack_get_binary(archive, 0, &binary0);
   ASSERT_EQ(err, KPACK_SUCCESS);
-  EXPECT_STREQ(binary0, "bin/testapp");
+  EXPECT_STREQ(binary0, "bin/testapp#0");
 
-  // Get binary 1 (expected: lib/libtest.so)
+  // Get binary 1 (expected: lib/libtest.so#0)
   const char* binary1;
   err = kpack_get_binary(archive, 1, &binary1);
   ASSERT_EQ(err, KPACK_SUCCESS);
-  EXPECT_STREQ(binary1, "lib/libtest.so");
+  EXPECT_STREQ(binary1, "lib/libtest.so#0");
 
   // Verify pointer stability - get again, should be same pointer
   const char* binary0_again;
@@ -202,12 +202,12 @@ TEST(ArchiveIntegrationTest, GetBinaryNames_Zstd) {
   const char* binary0;
   err = kpack_get_binary(archive, 0, &binary0);
   ASSERT_EQ(err, KPACK_SUCCESS);
-  EXPECT_STREQ(binary0, "bin/hiptest");
+  EXPECT_STREQ(binary0, "bin/hiptest#0");
 
   const char* binary1;
   err = kpack_get_binary(archive, 1, &binary1);
   ASSERT_EQ(err, KPACK_SUCCESS);
-  EXPECT_STREQ(binary1, "lib/libhip.so");
+  EXPECT_STREQ(binary1, "lib/libhip.so#0");
 
   kpack_close(archive);
 }
@@ -224,7 +224,7 @@ TEST(ArchiveIntegrationTest, KernelCacheOverwrite) {
   // Load first kernel
   void* kernel1_data;
   size_t kernel1_size;
-  err = kpack_get_kernel(archive, "lib/libtest.so", "gfx900", &kernel1_data,
+  err = kpack_get_kernel(archive, "lib/libtest.so#0", "gfx900", &kernel1_data,
                          &kernel1_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel1_size, 119);
@@ -232,7 +232,7 @@ TEST(ArchiveIntegrationTest, KernelCacheOverwrite) {
   // Load second kernel - returns independent copy
   void* kernel2_data;
   size_t kernel2_size;
-  err = kpack_get_kernel(archive, "lib/libtest.so", "gfx906", &kernel2_data,
+  err = kpack_get_kernel(archive, "lib/libtest.so#0", "gfx906", &kernel2_data,
                          &kernel2_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
 
@@ -246,7 +246,7 @@ TEST(ArchiveIntegrationTest, KernelCacheOverwrite) {
   // Load first kernel again - verify it still works
   void* kernel1_reload;
   size_t kernel1_reload_size;
-  err = kpack_get_kernel(archive, "lib/libtest.so", "gfx900", &kernel1_reload,
+  err = kpack_get_kernel(archive, "lib/libtest.so#0", "gfx900", &kernel1_reload,
                          &kernel1_reload_size);
   ASSERT_EQ(err, KPACK_SUCCESS);
   EXPECT_EQ(kernel1_reload_size, 119);

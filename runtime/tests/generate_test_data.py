@@ -25,30 +25,33 @@ def generate_noop_archive(output_dir: Path) -> None:
     )
 
     # Add test kernels with recognizable patterns
-    # Kernel 1: lib/libtest.so @ gfx900
+    # TOC keys always use indexed format: "binary#N"
+    # Runtime constructs lookup_key as kernel_name + "#" + co_index
+    #
+    # Kernel 1: lib/libtest.so#0 @ gfx900
     kernel1_data = b"KERNEL1_GFX900_DATA" + b"\x00" * 100
-    prepared1 = archive.prepare_kernel("lib/libtest.so", "gfx900", kernel1_data)
+    prepared1 = archive.prepare_kernel("lib/libtest.so#0", "gfx900", kernel1_data)
     archive.add_kernel(prepared1)
 
-    # Kernel 2: lib/libtest.so @ gfx906
+    # Kernel 2: lib/libtest.so#0 @ gfx906
     kernel2_data = b"KERNEL2_GFX906_DATA" + b"\x00" * 200
-    prepared2 = archive.prepare_kernel("lib/libtest.so", "gfx906", kernel2_data)
+    prepared2 = archive.prepare_kernel("lib/libtest.so#0", "gfx906", kernel2_data)
     archive.add_kernel(prepared2)
 
-    # Kernel 3: bin/testapp @ gfx900
+    # Kernel 3: bin/testapp#0 @ gfx900
     kernel3_data = b"KERNEL3_APP_GFX900" + b"\xFF" * 150
-    prepared3 = archive.prepare_kernel("bin/testapp", "gfx900", kernel3_data)
+    prepared3 = archive.prepare_kernel("bin/testapp#0", "gfx900", kernel3_data)
     archive.add_kernel(prepared3)
 
     archive.finalize_archive()
     output_path = output_dir / "test_noop.kpack"
     archive.write(output_path)
     print(f"Generated NoOp archive: {output_path}")
-    print(f"  - 2 binaries, 3 kernels")
+    print(f"  - 2 binaries, 3 kernels (indexed TOC keys)")
     print(
-        f"  - lib/libtest.so: gfx900 ({len(kernel1_data)} bytes), gfx906 ({len(kernel2_data)} bytes)"
+        f"  - lib/libtest.so#0: gfx900 ({len(kernel1_data)} bytes), gfx906 ({len(kernel2_data)} bytes)"
     )
-    print(f"  - bin/testapp: gfx900 ({len(kernel3_data)} bytes)")
+    print(f"  - bin/testapp#0: gfx900 ({len(kernel3_data)} bytes)")
 
 
 def generate_zstd_archive(output_dir: Path) -> None:
@@ -61,30 +64,32 @@ def generate_zstd_archive(output_dir: Path) -> None:
     )
 
     # Add test kernels with compressible patterns
-    # Kernel 1: lib/libhip.so @ gfx1100
+    # TOC keys always use indexed format: "binary#N"
+    #
+    # Kernel 1: lib/libhip.so#0 @ gfx1100
     kernel1_data = b"HIP_KERNEL_GFX1100_" + b"A" * 500 + b"B" * 500
-    prepared1 = archive.prepare_kernel("lib/libhip.so", "gfx1100", kernel1_data)
+    prepared1 = archive.prepare_kernel("lib/libhip.so#0", "gfx1100", kernel1_data)
     archive.add_kernel(prepared1)
 
-    # Kernel 2: lib/libhip.so @ gfx1101
+    # Kernel 2: lib/libhip.so#0 @ gfx1101
     kernel2_data = b"HIP_KERNEL_GFX1101_" + b"X" * 300 + b"Y" * 300
-    prepared2 = archive.prepare_kernel("lib/libhip.so", "gfx1101", kernel2_data)
+    prepared2 = archive.prepare_kernel("lib/libhip.so#0", "gfx1101", kernel2_data)
     archive.add_kernel(prepared2)
 
-    # Kernel 3: bin/hiptest @ gfx1100
+    # Kernel 3: bin/hiptest#0 @ gfx1100
     kernel3_data = b"TEST_APP_KERNEL___" + b"\x42" * 1000
-    prepared3 = archive.prepare_kernel("bin/hiptest", "gfx1100", kernel3_data)
+    prepared3 = archive.prepare_kernel("bin/hiptest#0", "gfx1100", kernel3_data)
     archive.add_kernel(prepared3)
 
     archive.finalize_archive()
     output_path = output_dir / "test_zstd.kpack"
     archive.write(output_path)
     print(f"Generated Zstd archive: {output_path}")
-    print(f"  - 2 binaries, 3 kernels")
+    print(f"  - 2 binaries, 3 kernels (indexed TOC keys)")
     print(
-        f"  - lib/libhip.so: gfx1100 ({len(kernel1_data)} bytes), gfx1101 ({len(kernel2_data)} bytes)"
+        f"  - lib/libhip.so#0: gfx1100 ({len(kernel1_data)} bytes), gfx1101 ({len(kernel2_data)} bytes)"
     )
-    print(f"  - bin/hiptest: gfx1100 ({len(kernel3_data)} bytes)")
+    print(f"  - bin/hiptest#0: gfx1100 ({len(kernel3_data)} bytes)")
 
 
 def main() -> None:

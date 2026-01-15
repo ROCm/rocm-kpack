@@ -239,8 +239,7 @@ void kpack_cache_destroy(kpack_cache_t cache) {
 
 kpack_error_t kpack_load_code_object(kpack_cache_t cache,
                                      const void* hipk_metadata,
-                                     const char* binary_path,
-                                     uint32_t co_index,
+                                     const char* binary_path, uint32_t co_index,
                                      const char* const* arch_list,
                                      size_t arch_count, void** code_object_out,
                                      size_t* code_object_size_out) {
@@ -270,12 +269,10 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
     return err;
   }
 
-  // Construct lookup key: kernel_name with optional index suffix for multi-TU
-  // The TOC stores entries as "lib/foo.so#0", "lib/foo.so#1", etc.
-  std::string lookup_key = kernel_name;
-  if (co_index > 0) {
-    lookup_key += "#" + std::to_string(co_index);
-  }
+  // Construct lookup key: kernel_name with index suffix
+  // The TOC always uses indexed entries: "lib/foo.so#0", "lib/foo.so#1", etc.
+  // Even single-TU binaries use #0 for consistency.
+  std::string lookup_key = kernel_name + "#" + std::to_string(co_index);
 
   KPACK_DEBUG(cache,
               "parsed HIPK metadata: kernel_name='%s', co_index=%u, "

@@ -1,5 +1,6 @@
 """Tests for kpack_transform PE/COFF operations."""
 
+import struct
 from pathlib import Path
 
 import pytest
@@ -253,6 +254,38 @@ class TestRewriteHipfatbinMagic:
         content_after = surgery.get_section_content(segment)
         magic_after = int.from_bytes(content_after[:4], "little")
         assert magic_after == HIPK_MAGIC
+
+    def test_wrapper_index_in_reserved1(self, test_assets_dir: Path):
+        """Test that wrapper index is written to reserved1 field (offset +16).
+
+        For multi-TU support, CLR reads the bundle index from reserved1 and
+        passes it to kpack_load_code_object as co_index. This index is used
+        to look up the correct kernel in the kpack archive TOC.
+        """
+        input_binary = (
+            test_assets_dir / "bundled_binaries/windows/cov5/test_kernel_single.exe"
+        )
+
+        surgery = CoffSurgery.load(input_binary)
+
+        segment = surgery.find_section(SECTION_HIP_FATBIN_SEGMENT)
+        assert segment is not None
+
+        segment_offset = surgery.rva_to_file_offset(segment.rva)
+        num_wrappers = segment.virtual_size // WRAPPER_SIZE
+
+        # Rewrite magic (this also writes wrapper indices)
+        count = rewrite_hipfatbin_magic(surgery)
+        assert count >= 1
+
+        # Verify each wrapper has correct index in reserved1 (offset +16)
+        for i in range(num_wrappers):
+            wrapper_offset = segment_offset + i * WRAPPER_SIZE
+            reserved1 = struct.unpack_from("<I", surgery.data, wrapper_offset + 16)[0]
+            assert reserved1 == i, (
+                f"Wrapper {i} reserved1 field should be {i}, got {reserved1}. "
+                "This index is used by CLR as co_index for kpack lookup."
+            )
 
 
 class TestNotFatBinary:
