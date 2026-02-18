@@ -272,6 +272,15 @@ def conservative_zero_page(
     del surgery.data[aligned_offset : aligned_offset + aligned_size]
     bytes_removed = old_size - len(surgery.data)
 
+    # Adjust ELF header offsets for removed bytes.
+    # This must happen before ProgramHeaderManager.apply() so it sees
+    # correct e_phoff when calculating available space for in-place writes.
+    ehdr = surgery.ehdr
+    if ehdr.e_phoff > aligned_offset:
+        surgery._ehdr.e_phoff -= aligned_size
+    if ehdr.e_shoff > aligned_offset:
+        surgery._ehdr.e_shoff -= aligned_size
+
     # Split the target PT_LOAD into pieces
     pieces = split_load_segment(
         target_load,
@@ -335,12 +344,8 @@ def conservative_zero_page(
     manager._phdrs = new_phdrs
     phdr_result = manager.apply()
 
-    # Update section header table offset
-    ehdr = surgery.ehdr
-    if ehdr.e_shoff > aligned_offset:
-        surgery._ehdr.e_shoff -= aligned_size
-
     # Update section headers
+    # (e_phoff and e_shoff were already adjusted above, before apply())
     for sect in surgery.iter_sections():
         if sect.index == section.index:
             # Mark as NOBITS
