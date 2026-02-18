@@ -356,27 +356,30 @@ class ElfSurgery:
         return max_vaddr
 
     def get_min_content_offset(self) -> int:
-        """Get minimum file offset of actual content (after headers).
+        """Get minimum file offset of actual content after the PHDR table.
 
-        This is useful for determining how much space is available
-        for expanding the program header table.
+        This determines how much space is available for expanding the
+        program header table in place. Content at or before e_phoff is
+        excluded (it doesn't constrain expansion). Content after e_phoff
+        — including sections that the linker placed between PHDR entries
+        and the first segment — is included because it would be
+        overwritten by expansion.
         """
         min_offset = len(self._data)
+        e_phoff = self._ehdr.e_phoff
 
-        # Check section headers (if they come before EOF)
+        # Find the first section with content after e_phoff.
         for shdr in self._shdrs:
-            if shdr.sh_type != 0 and shdr.sh_offset > 0:  # Skip NULL and zero-offset
-                # Only consider sections not overlapping with PHDR table
-                if (
-                    shdr.sh_offset
-                    >= self._ehdr.e_phoff + self._ehdr.e_phnum * ELF64_PHDR_SIZE
-                ):
-                    min_offset = min(min_offset, shdr.sh_offset)
+            if shdr.sh_type != 0 and shdr.sh_offset > e_phoff:
+                min_offset = min(min_offset, shdr.sh_offset)
 
-        # Check program headers for content start
+        # Find the first PT_LOAD segment after e_phoff.
+        # PT_LOAD at offset 0 (covering the ELF header) is correctly
+        # excluded since 0 <= e_phoff for any valid ELF.
         for phdr in self._phdrs:
             if phdr.p_type == PT_LOAD and phdr.p_filesz > 0:
-                min_offset = min(min_offset, phdr.p_offset)
+                if phdr.p_offset > e_phoff:
+                    min_offset = min(min_offset, phdr.p_offset)
 
         return min_offset
 

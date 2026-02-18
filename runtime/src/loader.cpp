@@ -29,6 +29,23 @@ constexpr const char* ENV_KPACK_DEBUG = "ROCM_KPACK_DEBUG";
     }                                              \
   } while (0)
 
+// Target triple prefix to strip: "amdgcn-amd-amdhsa--gfx1201" -> "gfx1201"
+// This matches the transformation done on the pack side from
+// clang-offload-bundler
+constexpr char kTargetTriplePrefix[] = "amdgcn-amd-amdhsa--";
+constexpr size_t kTargetTriplePrefixLen = sizeof(kTargetTriplePrefix) - 1;
+
+// Strip target triple prefix if present
+std::string strip_target_prefix(const char* arch) {
+  if (!arch) return "";
+  std::string s(arch);
+  if (s.size() > kTargetTriplePrefixLen &&
+      s.compare(0, kTargetTriplePrefixLen, kTargetTriplePrefix) == 0) {
+    return s.substr(kTargetTriplePrefixLen);
+  }
+  return s;
+}
+
 // Helper to find key in msgpack map
 msgpack::object* find_key(const msgpack::object_map& map, const char* key) {
   for (size_t i = 0; i < map.size; ++i) {
@@ -163,6 +180,116 @@ bool file_exists(const std::string& path) {
   }
 }
 
+// Read and parse a .kpm manifest file to get kpack paths for architectures
+// Manifest format:
+// {
+//   "format_version": 1,
+//   "component_name": "...",
+//   "kpack_files": {
+//     "gfx1100": {"file": "name_gfx1100.kpack", ...},
+//     ...
+//   }
+// }
+std::vector<std::string> resolve_manifest(const std::string& manifest_path,
+                                          const char* const* arch_list,
+                                          size_t arch_count,
+                                          kpack_cache* cache) {
+  namespace fs = std::filesystem;
+  std::vector<std::string> result;
+
+  // Read manifest file
+  std::FILE* f = std::fopen(manifest_path.c_str(), "rb");
+  if (!f) {
+    KPACK_DEBUG(cache, "failed to open manifest: %s", manifest_path.c_str());
+    return result;
+  }
+
+  std::fseek(f, 0, SEEK_END);
+  long file_size = std::ftell(f);
+  std::fseek(f, 0, SEEK_SET);
+
+  if (file_size <= 0 || file_size > 1024 * 1024) {  // Max 1MB
+    std::fclose(f);
+    return result;
+  }
+
+  std::vector<char> buffer(file_size);
+  size_t read = std::fread(buffer.data(), 1, file_size, f);
+  std::fclose(f);
+
+  if (read != static_cast<size_t>(file_size)) {
+    return result;
+  }
+
+  // Parse manifest msgpack
+  msgpack::object_handle oh;
+  try {
+    oh = msgpack::unpack(buffer.data(), buffer.size());
+  } catch (...) {
+    KPACK_DEBUG(cache, "failed to parse manifest: %s", manifest_path.c_str());
+    return result;
+  }
+
+  msgpack::object obj = oh.get();
+  if (obj.type != msgpack::type::MAP) {
+    return result;
+  }
+
+  const auto& map = obj.via.map;
+
+  // Get kpack_files map
+  auto* kpack_files = find_key(map, "kpack_files");
+  if (!kpack_files || kpack_files->type != msgpack::type::MAP) {
+    KPACK_DEBUG(cache, "manifest missing kpack_files: %s",
+                manifest_path.c_str());
+    return result;
+  }
+
+  // Get directory containing manifest
+  std::string manifest_dir;
+  try {
+    manifest_dir = fs::path(manifest_path).parent_path().string();
+  } catch (...) {
+    return result;
+  }
+
+  // For each requested architecture, look for matching kpack file
+  const auto& files_map = kpack_files->via.map;
+  for (size_t i = 0; i < arch_count; ++i) {
+    if (!arch_list[i]) continue;
+
+    std::string base_arch = strip_target_prefix(arch_list[i]);
+
+    KPACK_DEBUG(cache, "manifest lookup: %s (base: %s)", arch_list[i],
+                base_arch.c_str());
+
+    // Look for this arch in kpack_files
+    for (size_t j = 0; j < files_map.size; ++j) {
+      const auto& kv = files_map.ptr[j];
+      if (kv.key.type != msgpack::type::STR) continue;
+
+      std::string arch_key(kv.key.via.str.ptr, kv.key.via.str.size);
+      if (arch_key != base_arch) continue;
+
+      // Found architecture, extract file path
+      if (kv.val.type != msgpack::type::MAP) continue;
+
+      const auto& arch_info = kv.val.via.map;
+      auto* file_val = find_key(arch_info, "file");
+      if (!file_val || file_val->type != msgpack::type::STR) continue;
+
+      std::string kpack_file(file_val->via.str.ptr, file_val->via.str.size);
+      std::string full_path = manifest_dir + "/" + kpack_file;
+
+      KPACK_DEBUG(cache, "manifest %s: arch %s -> %s", manifest_path.c_str(),
+                  arch_list[i], full_path.c_str());
+      result.push_back(full_path);
+    }
+  }
+
+  return result;
+}
+
 // Get canonical path for cache key (exception-safe)
 std::string get_canonical_path(const std::string& path) {
   namespace fs = std::filesystem;
@@ -280,29 +407,40 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
               kernel_name.c_str(), co_index, lookup_key.c_str(),
               embedded_search_paths.size());
 
-  // Build final search paths list
-  std::vector<std::string> search_paths;
+  // Build final list of .kpack archive paths.
+  // Override/prefix paths are direct .kpack paths.
+  // Embedded paths from HIPK metadata are always manifests (.kpm) that
+  // resolve to .kpack paths based on the requested architectures.
+  std::vector<std::string> kpack_paths;
 
   if (!cache->env_path_override.empty()) {
-    // Use override exclusively
-    search_paths = cache->env_path_override;
+    // Use override exclusively (direct .kpack paths)
+    kpack_paths = cache->env_path_override;
     KPACK_DEBUG(cache, "using %s override: %zu paths", ENV_KPACK_PATH,
-                search_paths.size());
+                kpack_paths.size());
   } else {
-    // Prepend prefix paths
+    // Prepend prefix paths (direct .kpack paths)
     if (!cache->env_path_prefix.empty()) {
-      search_paths.insert(search_paths.end(), cache->env_path_prefix.begin(),
-                          cache->env_path_prefix.end());
+      kpack_paths.insert(kpack_paths.end(), cache->env_path_prefix.begin(),
+                         cache->env_path_prefix.end());
       KPACK_DEBUG(cache, "prepending %zu paths from %s",
                   cache->env_path_prefix.size(), ENV_KPACK_PATH_PREFIX);
     }
 
-    // Resolve embedded paths relative to binary
+    // Resolve embedded paths as manifests -> .kpack paths
     for (const auto& rel_path : embedded_search_paths) {
       std::string resolved = resolve_path(binary_path, rel_path);
-      search_paths.push_back(resolved);
-      KPACK_DEBUG(cache, "resolved search path: %s -> %s", rel_path.c_str(),
+      KPACK_DEBUG(cache, "resolving manifest: %s -> %s", rel_path.c_str(),
                   resolved.c_str());
+      auto resolved_paths =
+          resolve_manifest(resolved, arch_list, arch_count, cache);
+      if (!resolved_paths.empty()) {
+        kpack_paths.insert(kpack_paths.end(), resolved_paths.begin(),
+                           resolved_paths.end());
+      } else {
+        KPACK_DEBUG(cache, "manifest resolved to no kpack files: %s",
+                    resolved.c_str());
+      }
     }
   }
 
@@ -312,7 +450,7 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
   {
     std::lock_guard<std::mutex> lock(cache->archive_mutex);
 
-    for (const auto& path : search_paths) {
+    for (const auto& path : kpack_paths) {
       std::string canonical = get_canonical_path(path);
 
       // Check if already cached
@@ -357,8 +495,8 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
   }
 
   if (valid_archive_paths.empty()) {
-    KPACK_DEBUG(cache, "no valid archives found in %zu search paths",
-                search_paths.size());
+    KPACK_DEBUG(cache, "no valid archives found in %zu kpack paths",
+                kpack_paths.size());
     return KPACK_ERROR_ARCHIVE_NOT_FOUND;
   }
 
@@ -373,7 +511,10 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
       continue;
     }
 
-    KPACK_DEBUG(cache, "trying architecture: %s", arch);
+    // Strip target triple prefix for archive lookup
+    std::string base_arch = strip_target_prefix(arch);
+    KPACK_DEBUG(cache, "trying architecture: %s (base: %s)", arch,
+                base_arch.c_str());
 
     // Find archive containing this architecture
     // Lock only for cache lookup, release before kernel fetch
@@ -385,7 +526,7 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
         // Check if this archive has the architecture (fast lookup)
         auto arch_it = cache->archive_archs.find(archive_path);
         if (arch_it == cache->archive_archs.end() ||
-            arch_it->second.count(arch) == 0) {
+            arch_it->second.count(base_arch) == 0) {
           continue;
         }
 
@@ -407,8 +548,10 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
 
     // Fetch kernel - kpack_get_kernel() is thread-safe and allocates result
     // Use lookup_key which includes the co_index suffix for multi-TU binaries
-    err = kpack_get_kernel(archive, lookup_key.c_str(), arch, &kernel_data,
-                           &kernel_size);
+    // Use base_arch (stripped) since that's how kernels are stored in the
+    // archive
+    err = kpack_get_kernel(archive, lookup_key.c_str(), base_arch.c_str(),
+                           &kernel_data, &kernel_size);
     if (err == KPACK_SUCCESS) {
       KPACK_DEBUG(cache, "  found kernel: %zu bytes", kernel_size);
       break;
