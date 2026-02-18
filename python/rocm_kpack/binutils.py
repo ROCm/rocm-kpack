@@ -208,6 +208,7 @@ class BundledBinary:
     def __init__(self, file_path: Path, *, toolchain: Toolchain | None = None):
         # Initialize _temp_dir first to ensure cleanup works even if init fails
         self._temp_dir: Path | None = None  # For extracted .hip_fatbin sections
+        self._has_concatenated_bundles: bool | None = None  # Cached detection result
 
         self.toolchain = toolchain or Toolchain()
         self.file_path = file_path
@@ -314,11 +315,98 @@ class BundledBinary:
 
         return fatbin_path
 
+    def _detect_concatenated_bundles(self, fatbin_path: Path) -> bool:
+        """Detect if the fatbin contains multiple concatenated bundles.
+
+        Libraries built with -fgpu-rdc have multiple __CLANG_OFFLOAD_BUNDLE__
+        blocks concatenated together. clang-offload-bundler only sees the first
+        one, so we need to use our own parser for these cases.
+
+        Args:
+            fatbin_path: Path to extracted .hip_fatbin section
+
+        Returns:
+            True if multiple bundles detected, False otherwise
+        """
+        if self._has_concatenated_bundles is not None:
+            return self._has_concatenated_bundles
+
+        from rocm_kpack.ccob_parser import find_bundle_offsets
+
+        data = fatbin_path.read_bytes()
+        offsets = find_bundle_offsets(data)
+        self._has_concatenated_bundles = len(offsets) > 1
+        return self._has_concatenated_bundles
+
+    def _list_bundled_targets_concatenated(
+        self, fatbin_path: Path
+    ) -> list[tuple[str, str]]:
+        """List targets from concatenated bundles (RDC case).
+
+        Returns multiple entries per target, one for each bundle containing
+        that target. Filenames are indexed (e.g., target_0.hsaco).
+
+        Args:
+            fatbin_path: Path to extracted .hip_fatbin section
+
+        Returns:
+            List of (target_name, filename) tuples with indexed filenames
+        """
+        from rocm_kpack.ccob_parser import extract_all_code_objects
+
+        data = fatbin_path.read_bytes()
+        code_objects = extract_all_code_objects(data)
+
+        result = []
+        for i, obj in enumerate(code_objects):
+            # Create indexed filename: hipv4-amdgcn-...-gfx1100_0.hsaco
+            base_ext = ".hsaco" if obj.target.startswith("hip") else ".elf"
+            filename = f"{obj.target}_{i}{base_ext}"
+            result.append((obj.target, filename))
+
+        return result
+
+    def _unbundle_concatenated(self, fatbin_path: Path, *, outputs: list[Path]):
+        """Unbundle all code objects from concatenated bundles (RDC case).
+
+        Writes each code object to the corresponding output path.
+
+        Args:
+            fatbin_path: Path to extracted .hip_fatbin section
+            outputs: List of output paths for each code object
+        """
+        from rocm_kpack.ccob_parser import extract_all_code_objects
+
+        data = fatbin_path.read_bytes()
+        code_objects = extract_all_code_objects(data)
+
+        # Filter out host entries to match the listing
+        device_objects = [
+            obj for obj in code_objects if not obj.target.startswith("host")
+        ]
+
+        if len(device_objects) != len(outputs):
+            raise ValueError(
+                f"Output count mismatch: {len(device_objects)} code objects "
+                f"but {len(outputs)} output paths"
+            )
+
+        for obj, output_path in zip(device_objects, outputs):
+            output_path.write_bytes(obj.data)
+
     def _list_bundled_targets(self, file_path: Path) -> list[tuple[str, str]]:
-        """Returns a list of (target_name, file_name) for all bundles."""
+        """Returns a list of (target_name, file_name) for all bundles.
+
+        For concatenated bundles (RDC libraries), returns multiple entries per
+        target with indexed filenames.
+        """
         bundler_input = self._get_bundler_input()
 
-        # Try clang-offload-bundler first
+        # Check for concatenated bundles first - clang-offload-bundler can't handle these
+        if self._detect_concatenated_bundles(bundler_input):
+            return self._list_bundled_targets_concatenated(bundler_input)
+
+        # Try clang-offload-bundler for single-bundle case
         try:
             lines = (
                 self.toolchain.exec_capture_text(
@@ -399,7 +487,12 @@ class BundledBinary:
 
         bundler_input = self._get_bundler_input()
 
-        # Try clang-offload-bundler first
+        # Check for concatenated bundles first - clang-offload-bundler can't handle these
+        if self._detect_concatenated_bundles(bundler_input):
+            self._unbundle_concatenated(bundler_input, outputs=outputs)
+            return
+
+        # Try clang-offload-bundler for single-bundle case
         try:
             args = [
                 self.toolchain.clang_offload_bundler,
