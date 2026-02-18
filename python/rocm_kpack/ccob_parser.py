@@ -250,7 +250,8 @@ def decompress_ccob(data: bytes) -> bytes:
         )
 
     # Extract compressed data using totalSize (not reading to EOF!)
-    header_size = 32
+    # Version 3 has 64-bit size fields (32-byte header), earlier versions use 32-bit (24-byte header)
+    header_size = 32 if header.version == 3 else 24
     compressed_data = data[header_size : header.total_size]
 
     # Decompress using zstd
@@ -502,3 +503,74 @@ def extract_code_objects_by_target(
         by_target[obj.target].append(obj.data)
 
     return dict(by_target)
+
+
+# =============================================================================
+# Unified Fatbin Entry Points
+# =============================================================================
+#
+# These functions handle ALL fatbin formats through a single entry point:
+# - CCOB-compressed bundles (start with "CCOB" magic)
+# - Single uncompressed bundles (__CLANG_OFFLOAD_BUNDLE__)
+# - Concatenated uncompressed bundles (multiple __CLANG_OFFLOAD_BUNDLE__)
+
+CCOB_MAGIC = b"CCOB"
+
+
+def parse_fatbin_data(data: bytes) -> list[UncompressedBundle]:
+    """Parse fatbin data in any supported format.
+
+    Handles CCOB-compressed bundles, single uncompressed bundles, and
+    concatenated uncompressed bundles (RDC case).
+
+    Args:
+        data: Raw fatbin data bytes
+
+    Returns:
+        List of parsed UncompressedBundle objects
+
+    Raises:
+        ValueError: If data format is not recognized
+    """
+    if data[:4] == CCOB_MAGIC:
+        decompressed = decompress_ccob(data)
+        return parse_concatenated_bundles(decompressed)
+
+    if UNCOMPRESSED_BUNDLE_MAGIC in data:
+        return parse_concatenated_bundles(data)
+
+    raise ValueError(f"Unrecognized fatbin format: first 4 bytes are {data[:4]!r}")
+
+
+def extract_code_objects_from_fatbin(data: bytes) -> list[ExtractedCodeObject]:
+    """Extract all device code objects from fatbin data in any format.
+
+    Unified entry point that handles CCOB, single bundle, and concatenated
+    bundles. Host entries are excluded.
+
+    Args:
+        data: Raw fatbin data bytes
+
+    Returns:
+        List of ExtractedCodeObject (host entries excluded)
+
+    Raises:
+        ValueError: If data format is not recognized
+    """
+    bundles = parse_fatbin_data(data)
+    code_objects = []
+
+    for bundle_idx, bundle in enumerate(bundles):
+        for entry in bundle.entries:
+            if entry.triple.startswith("host"):
+                continue
+            obj_data = bundle.data[entry.offset : entry.offset + entry.size]
+            code_objects.append(
+                ExtractedCodeObject(
+                    target=entry.triple,
+                    data=obj_data,
+                    bundle_index=bundle_idx,
+                )
+            )
+
+    return code_objects

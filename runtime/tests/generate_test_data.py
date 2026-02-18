@@ -11,6 +11,8 @@ from pathlib import Path
 # Add Python module to path
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "python"))
 
+import msgpack
+
 from rocm_kpack.kpack import PackedKernelArchive
 from rocm_kpack.compression import NoOpCompressor, ZstdCompressor
 
@@ -92,6 +94,73 @@ def generate_zstd_archive(output_dir: Path) -> None:
     print(f"  - bin/hiptest#0: gfx1100 ({len(kernel3_data)} bytes)")
 
 
+def generate_test_manifests(output_dir: Path) -> None:
+    """Generate .kpm manifest files for testing manifest resolution."""
+    # Manifest for test_noop.kpack (gfx900, gfx906)
+    noop_manifest = {
+        "format_version": 1,
+        "component_name": "test_noop",
+        "prefix": "lib",
+        "kpack_files": {
+            "gfx900": {
+                "file": "test_noop.kpack",
+                "size": (output_dir / "test_noop.kpack").stat().st_size,
+                "kernel_count": 2,
+            },
+            "gfx906": {
+                "file": "test_noop.kpack",
+                "size": (output_dir / "test_noop.kpack").stat().st_size,
+                "kernel_count": 1,
+            },
+        },
+    }
+    noop_path = output_dir / "test_noop.kpm"
+    noop_path.write_bytes(msgpack.packb(noop_manifest))
+    print(f"Generated manifest: {noop_path}")
+    print(f"  - gfx900, gfx906 -> test_noop.kpack")
+
+    # Manifest for test_zstd.kpack (gfx1100, gfx1101)
+    zstd_manifest = {
+        "format_version": 1,
+        "component_name": "test_zstd",
+        "prefix": "lib",
+        "kpack_files": {
+            "gfx1100": {
+                "file": "test_zstd.kpack",
+                "size": (output_dir / "test_zstd.kpack").stat().st_size,
+                "kernel_count": 2,
+            },
+            "gfx1101": {
+                "file": "test_zstd.kpack",
+                "size": (output_dir / "test_zstd.kpack").stat().st_size,
+                "kernel_count": 1,
+            },
+        },
+    }
+    zstd_path = output_dir / "test_zstd.kpm"
+    zstd_path.write_bytes(msgpack.packb(zstd_manifest))
+    print(f"Generated manifest: {zstd_path}")
+    print(f"  - gfx1100, gfx1101 -> test_zstd.kpack")
+
+    # Partial manifest (only gfx900, no gfx906) for negative tests
+    partial_manifest = {
+        "format_version": 1,
+        "component_name": "test_partial",
+        "prefix": "lib",
+        "kpack_files": {
+            "gfx900": {
+                "file": "test_noop.kpack",
+                "size": (output_dir / "test_noop.kpack").stat().st_size,
+                "kernel_count": 2,
+            },
+        },
+    }
+    partial_path = output_dir / "test_partial.kpm"
+    partial_path.write_bytes(msgpack.packb(partial_manifest))
+    print(f"Generated manifest: {partial_path}")
+    print(f"  - gfx900 only -> test_noop.kpack")
+
+
 def main() -> None:
     """Generate all test archives."""
     # Output to runtime/tests/test_assets
@@ -105,6 +174,8 @@ def main() -> None:
     generate_noop_archive(output_dir)
     print()
     generate_zstd_archive(output_dir)
+    print()
+    generate_test_manifests(output_dir)
     print()
     print("Done!")
 

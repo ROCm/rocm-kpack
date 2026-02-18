@@ -32,8 +32,8 @@ constexpr const char* ENV_KPACK_DEBUG = "ROCM_KPACK_DEBUG";
 // Target triple prefix to strip: "amdgcn-amd-amdhsa--gfx1201" -> "gfx1201"
 // This matches the transformation done on the pack side from
 // clang-offload-bundler
-constexpr const char* kTargetTriplePrefix = "amdgcn-amd-amdhsa--";
-constexpr size_t kTargetTriplePrefixLen = 19;  // strlen("amdgcn-amd-amdhsa--")
+constexpr char kTargetTriplePrefix[] = "amdgcn-amd-amdhsa--";
+constexpr size_t kTargetTriplePrefixLen = sizeof(kTargetTriplePrefix) - 1;
 
 // Strip target triple prefix if present
 std::string strip_target_prefix(const char* arch) {
@@ -178,11 +178,6 @@ bool file_exists(const std::string& path) {
   } catch (...) {
     return false;
   }
-}
-
-// Check if path looks like a manifest file (.kpm extension)
-bool is_manifest_file(const std::string& path) {
-  return path.size() > 4 && path.compare(path.size() - 4, 4, ".kpm") == 0;
 }
 
 // Read and parse a .kpm manifest file to get kpack paths for architectures
@@ -412,48 +407,40 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
               kernel_name.c_str(), co_index, lookup_key.c_str(),
               embedded_search_paths.size());
 
-  // Build final search paths list
-  std::vector<std::string> search_paths;
+  // Build final list of .kpack archive paths.
+  // Override/prefix paths are direct .kpack paths.
+  // Embedded paths from HIPK metadata are always manifests (.kpm) that
+  // resolve to .kpack paths based on the requested architectures.
+  std::vector<std::string> kpack_paths;
 
   if (!cache->env_path_override.empty()) {
-    // Use override exclusively
-    search_paths = cache->env_path_override;
+    // Use override exclusively (direct .kpack paths)
+    kpack_paths = cache->env_path_override;
     KPACK_DEBUG(cache, "using %s override: %zu paths", ENV_KPACK_PATH,
-                search_paths.size());
+                kpack_paths.size());
   } else {
-    // Prepend prefix paths
+    // Prepend prefix paths (direct .kpack paths)
     if (!cache->env_path_prefix.empty()) {
-      search_paths.insert(search_paths.end(), cache->env_path_prefix.begin(),
-                          cache->env_path_prefix.end());
+      kpack_paths.insert(kpack_paths.end(), cache->env_path_prefix.begin(),
+                         cache->env_path_prefix.end());
       KPACK_DEBUG(cache, "prepending %zu paths from %s",
                   cache->env_path_prefix.size(), ENV_KPACK_PATH_PREFIX);
     }
 
-    // Resolve embedded paths relative to binary
+    // Resolve embedded paths as manifests -> .kpack paths
     for (const auto& rel_path : embedded_search_paths) {
       std::string resolved = resolve_path(binary_path, rel_path);
-      search_paths.push_back(resolved);
-      KPACK_DEBUG(cache, "resolved search path: %s -> %s", rel_path.c_str(),
+      KPACK_DEBUG(cache, "resolving manifest: %s -> %s", rel_path.c_str(),
                   resolved.c_str());
-    }
-  }
-
-  // Expand manifest files (.kpm) to actual kpack paths
-  // Must be done before archive opening loop since manifests need arch_list
-  std::vector<std::string> expanded_search_paths;
-  for (const auto& path : search_paths) {
-    if (is_manifest_file(path)) {
-      // Resolve manifest to actual kpack files based on architectures
-      auto kpack_paths = resolve_manifest(path, arch_list, arch_count, cache);
-      if (!kpack_paths.empty()) {
-        expanded_search_paths.insert(expanded_search_paths.end(),
-                                     kpack_paths.begin(), kpack_paths.end());
+      auto resolved_paths =
+          resolve_manifest(resolved, arch_list, arch_count, cache);
+      if (!resolved_paths.empty()) {
+        kpack_paths.insert(kpack_paths.end(), resolved_paths.begin(),
+                           resolved_paths.end());
       } else {
         KPACK_DEBUG(cache, "manifest resolved to no kpack files: %s",
-                    path.c_str());
+                    resolved.c_str());
       }
-    } else {
-      expanded_search_paths.push_back(path);
     }
   }
 
@@ -463,7 +450,7 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
   {
     std::lock_guard<std::mutex> lock(cache->archive_mutex);
 
-    for (const auto& path : expanded_search_paths) {
+    for (const auto& path : kpack_paths) {
       std::string canonical = get_canonical_path(path);
 
       // Check if already cached
@@ -508,8 +495,8 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
   }
 
   if (valid_archive_paths.empty()) {
-    KPACK_DEBUG(cache, "no valid archives found in %zu search paths",
-                search_paths.size());
+    KPACK_DEBUG(cache, "no valid archives found in %zu kpack paths",
+                kpack_paths.size());
     return KPACK_ERROR_ARCHIVE_NOT_FOUND;
   }
 
