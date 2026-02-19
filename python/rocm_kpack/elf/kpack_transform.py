@@ -21,6 +21,7 @@ import msgpack
 from ..kpack_transform import NotFatBinaryError
 from .surgery import ElfSurgery, SectionInfo, AddSectionResult
 from .operations import map_section_to_load, set_pointer
+from .verify import ElfVerifier
 from .zero_page import conservative_zero_page
 from .types import SHT_PROGBITS
 
@@ -382,6 +383,14 @@ def kpack_offload_binary(
                 "\nPhases 2-3: No .hip_fatbin section, skipping semantic "
                 "transformation and zero-page"
             )
+
+    # Post-transform verification: catch structural corruption at build time
+    verify_result = ElfVerifier.verify_data(surgery.data)
+    if not verify_result.passed:
+        raise RuntimeError(
+            f"Post-transform ELF verification failed for {input_path}:\n"
+            + "\n".join(f"  - {e}" for e in verify_result.errors)
+        )
 
     # Write final output
     surgery.save_preserving_mode(output_path, original_mode)
