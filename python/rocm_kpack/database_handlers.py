@@ -171,11 +171,49 @@ class AotritonHandler(DatabaseHandler):
             return None
 
 
+class MIOpenHandler(DatabaseHandler):
+    """Handler for MIOpen performance database/model files.
+
+    MIOpen installs tuning model files to share/miopen/db/ with filenames
+    prefixed by the target architecture (e.g., gfx942.tn.model,
+    gfx908_ConvAsm1x1U_decoder.ktn.model).
+    """
+
+    def name(self) -> str:
+        return "miopen"
+
+    def detect(self, path: Path, prefix_root: Path) -> Optional[str]:
+        """
+        Detect MIOpen tuning database files.
+
+        Pattern: share/miopen/db/gfx*.{tn.model,ktn.model}
+        """
+        try:
+            rel_path = path.relative_to(prefix_root)
+            path_str = rel_path.as_posix()
+
+            if "miopen/db" not in path_str:
+                return None
+
+            if not path.name.endswith(".model"):
+                return None
+
+            match = _GFX_ARCH_PATTERN.search(path.name)
+            if match:
+                return f"gfx{match.group(1)}"
+
+            return None
+
+        except (ValueError, AttributeError):
+            return None
+
+
 # Registry of available handlers
 AVAILABLE_HANDLERS = {
     "rocblas": RocBLASHandler,
     "hipblaslt": HipBLASLtHandler,
     "aotriton": AotritonHandler,
+    "miopen": MIOpenHandler,
 }
 
 
