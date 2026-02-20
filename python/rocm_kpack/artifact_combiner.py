@@ -10,7 +10,6 @@ from pathlib import Path
 
 from rocm_kpack.artifact_collector import ArtifactCollector, CollectedArtifact
 from rocm_kpack.artifact_utils import write_artifact_manifest
-from rocm_kpack.manifest_merger import ManifestMerger, PackManifest
 from rocm_kpack.packaging_config import ArchitectureGroup
 
 
@@ -25,7 +24,6 @@ class ArtifactCombiner:
     def __init__(
         self,
         collector: ArtifactCollector,
-        manifest_merger: ManifestMerger,
         verbose: bool = False,
     ):
         """
@@ -33,11 +31,9 @@ class ArtifactCombiner:
 
         Args:
             collector: ArtifactCollector with discovered artifacts
-            manifest_merger: ManifestMerger for combining .kpm files
             verbose: Enable verbose output
         """
         self.collector = collector
-        self.manifest_merger = manifest_merger
         self.verbose = verbose
         self._created_generic_artifacts: set[str] = set()
 
@@ -126,14 +122,6 @@ class ArtifactCombiner:
 
             arch_prefixes.update(arch_artifact.prefixes)
             self._copy_arch_content_only(arch_artifact, arch_output_dir)
-
-        # Create .kpm manifest for arch-specific artifact
-        self._create_arch_manifest(
-            sorted(arch_prefixes),
-            availability.available,
-            component_name,
-            arch_output_dir,
-        )
 
         # Write artifact manifest for arch-specific artifact
         write_artifact_manifest(arch_output_dir, sorted(arch_prefixes))
@@ -227,7 +215,7 @@ class ArtifactCombiner:
                 dst_kpack_dir = dst_prefix / ".kpack"
                 dst_kpack_dir.mkdir(parents=True, exist_ok=True)
 
-                # Copy .kpack files (but not .kpm manifests, we'll regenerate those)
+                # Copy .kpack files
                 for kpack_file in src_kpack_dir.glob("*.kpack"):
                     dst_kpack_file = dst_kpack_dir / kpack_file.name
                     if self.verbose:
@@ -341,102 +329,4 @@ class ArtifactCombiner:
                 raise RuntimeError(
                     f"Arch-specific file size mismatch after copy: "
                     f"{src_file.stat().st_size} -> {dst_file.stat().st_size}"
-                )
-
-    def _create_arch_manifest(
-        self,
-        prefixes: list[str],
-        architectures: list[str],
-        component_name: str,
-        output_dir: Path,
-    ) -> None:
-        """
-        Create .kpm manifests for arch-specific artifact.
-
-        Args:
-            prefixes: List of prefixes in the arch-specific artifact
-            architectures: List of architectures to include
-            component_name: Component name
-            output_dir: Arch-specific artifact directory
-        """
-        if self.verbose:
-            print(f"      Creating manifests for {len(prefixes)} prefixes")
-
-        for prefix in prefixes:
-            # Find all .kpm manifests in the output directory for this prefix
-            kpack_dir = output_dir / prefix / ".kpack"
-            if not kpack_dir.exists():
-                if self.verbose:
-                    print(f"        No .kpack directory in prefix {prefix}, skipping")
-                continue
-
-            # Build manifest entries from kpack files
-            kpack_files = list(kpack_dir.glob("*.kpack"))
-
-            if not kpack_files:
-                if self.verbose:
-                    print(
-                        f"        No .kpack files in prefix {prefix}, skipping manifest"
-                    )
-                continue
-
-            # Build manifest entries from kpack files
-            from rocm_kpack.manifest_merger import KpackFileEntry
-
-            kpack_entries: dict[str, KpackFileEntry] = {}
-
-            for kpack_file in kpack_files:
-                # Extract architecture from filename (e.g., component_gfx1100.kpack)
-                name_parts = kpack_file.stem.rsplit("_", 1)
-                if len(name_parts) != 2:
-                    if self.verbose:
-                        print(
-                            f"        Skipping kpack file with unexpected name: {kpack_file.name}"
-                        )
-                    continue
-
-                arch = name_parts[1]
-
-                if arch not in architectures:
-                    if self.verbose:
-                        print(
-                            f"        Skipping kpack for architecture {arch} (not in group)"
-                        )
-                    continue
-
-                # Get file size
-                size = kpack_file.stat().st_size
-
-                # Kernel count is not required by runtime; set to 0
-                # The runtime only uses the filename and architecture fields from the manifest.
-                # Parsing kpack files to extract kernel count would add complexity without benefit.
-                kernel_count = 0
-
-                kpack_entries[arch] = KpackFileEntry(
-                    architecture=arch,
-                    filename=kpack_file.name,
-                    size=size,
-                    kernel_count=kernel_count,
-                )
-
-            if not kpack_entries:
-                if self.verbose:
-                    print(f"        No valid kpack entries for prefix {prefix}")
-                continue
-
-            # Create manifest
-            manifest = PackManifest(
-                format_version=1,
-                component_name=component_name,
-                prefix=prefix,
-                kpack_files=kpack_entries,
-            )
-
-            # Write manifest
-            manifest_path = kpack_dir / f"{component_name}.kpm"
-            manifest.to_file(manifest_path)
-
-            if self.verbose:
-                print(
-                    f"        Created manifest with {len(kpack_entries)} architectures: {prefix}/.kpack/{component_name}.kpm"
                 )

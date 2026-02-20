@@ -15,7 +15,6 @@ from pathlib import Path
 
 from rocm_kpack.artifact_collector import ArtifactCollector
 from rocm_kpack.artifact_combiner import ArtifactCombiner
-from rocm_kpack.manifest_merger import ManifestMerger
 from rocm_kpack.packaging_config import PackagingConfig
 
 
@@ -35,7 +34,6 @@ Workflow:
   3. For each package group:
      - Copy generic artifact structure
      - Add architecture-specific kpack files and databases
-     - Merge .kpm manifests
   4. Create output artifacts ready for downstream packaging
 
 Exit codes:
@@ -179,8 +177,7 @@ Input directory structure:
         components = {args.component}
 
     # Create combiner
-    manifest_merger = ManifestMerger(verbose=args.verbose)
-    combiner = ArtifactCombiner(collector, manifest_merger, verbose=args.verbose)
+    combiner = ArtifactCombiner(collector, verbose=args.verbose)
 
     # Process each component
     print("Combining artifacts...")
