@@ -7,6 +7,7 @@ set(KPACK_SOURCES
     src/compression.cpp
     src/toc_parser.cpp
     src/path_resolution.cpp
+    src/isa_target_match.cpp
     src/loader.cpp
 )
 

@@ -460,11 +460,11 @@ TEST(LoaderAPITest, LoadCodeObject_FromNoopArchive) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  // Create HIPK metadata pointing to test_noop.kpm manifest
-  // The manifest maps gfx900, gfx906 -> test_noop.kpack
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  // Create HIPK metadata pointing directly to test_noop.kpack archive.
+  // The archive contains gfx900 and gfx906 architectures.
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
 
-  // binary_path is used to resolve relative manifest paths
+  // binary_path is used to resolve relative search paths
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   const char* arch_list[] = {"gfx900"};
@@ -495,9 +495,9 @@ TEST(LoaderAPITest, LoadCodeObject_FromZstdArchive) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  // Create HIPK metadata pointing to test_zstd.kpm manifest
-  // The manifest maps gfx1100, gfx1101 -> test_zstd.kpack
-  auto metadata = make_hipk_metadata("lib/libhip.so", {"test_zstd.kpm"});
+  // Create HIPK metadata pointing directly to test_zstd.kpack archive.
+  // The archive contains gfx1100 and gfx1101 architectures.
+  auto metadata = make_hipk_metadata("lib/libhip.so", {"test_zstd.kpack"});
 
   std::string binary_path = assets_dir + "/fake_binary.so";
 
@@ -529,7 +529,7 @@ TEST(LoaderAPITest, LoadCodeObject_ArchitecturePriority) {
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
   // Request [gfx906, gfx900] - should get gfx906 (first match)
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   const char* arch_list[] = {"gfx906", "gfx900"};
@@ -558,12 +558,10 @@ TEST(LoaderAPITest, LoadCodeObject_ArchNotFound) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
-  // Request architecture that doesn't exist in the manifest.
-  // Since the manifest doesn't map this arch to any archive,
-  // no archives are opened -> ARCHIVE_NOT_FOUND.
+  // Request architecture that doesn't exist in the archive.
   const char* arch_list[] = {"gfx9999"};
   void* code_object = nullptr;
   size_t size = 0;
@@ -572,7 +570,7 @@ TEST(LoaderAPITest, LoadCodeObject_ArchNotFound) {
       kpack_load_code_object(cache.get(), metadata.data(), binary_path.c_str(),
                              0, arch_list, 1, &code_object, &size);
 
-  EXPECT_EQ(err, KPACK_ERROR_ARCHIVE_NOT_FOUND);
+  EXPECT_EQ(err, KPACK_ERROR_ARCH_NOT_FOUND);
   EXPECT_EQ(code_object, nullptr);
 }
 
@@ -585,8 +583,8 @@ TEST(LoaderAPITest, LoadCodeObject_ArchiveNotFound) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  // Point to non-existent manifest
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"nonexistent.kpm"});
+  // Point to non-existent archive
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"nonexistent.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   const char* arch_list[] = {"gfx900"};
@@ -610,7 +608,7 @@ TEST(LoaderAPITest, LoadCodeObject_CacheReusesArchive) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   // First load
@@ -683,7 +681,7 @@ TEST(LoaderAPITest, LoadCodeObject_EnvPathOverride) {
 }
 
 //
-// Manifest resolution and target triple stripping tests
+// Target triple stripping tests
 //
 
 TEST(LoaderAPITest, LoadCodeObject_TargetTripleStripping) {
@@ -695,12 +693,11 @@ TEST(LoaderAPITest, LoadCodeObject_TargetTripleStripping) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   // Use full target triple with amdgcn-amd-amdhsa-- prefix.
-  // The loader should strip this to "gfx900" for both manifest lookup
-  // and archive architecture matching.
+  // The loader should strip this to "gfx900" for archive architecture matching.
   const char* arch_list[] = {"amdgcn-amd-amdhsa--gfx900"};
   void* code_object = nullptr;
   size_t size = 0;
@@ -716,7 +713,7 @@ TEST(LoaderAPITest, LoadCodeObject_TargetTripleStripping) {
   kpack_free_code_object(code_object);
 }
 
-TEST(LoaderAPITest, LoadCodeObject_ManifestArchNotInManifest) {
+TEST(LoaderAPITest, LoadCodeObject_ArchNotInArchive) {
   std::string assets_dir = get_test_assets_dir();
   if (assets_dir.empty()) {
     GTEST_SKIP() << "ROCM_KPACK_TEST_ASSETS_DIR not set";
@@ -725,12 +722,12 @@ TEST(LoaderAPITest, LoadCodeObject_ManifestArchNotInManifest) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  // test_partial.kpm only maps gfx900, not gfx906
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_partial.kpm"});
+  // test_zstd.kpack only contains gfx1100 and gfx1101
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_zstd.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
-  // Request gfx906 which is NOT in the partial manifest
-  const char* arch_list[] = {"gfx906"};
+  // Request gfx900 which is NOT in this archive
+  const char* arch_list[] = {"gfx900"};
   void* code_object = nullptr;
   size_t size = 0;
 
@@ -738,11 +735,11 @@ TEST(LoaderAPITest, LoadCodeObject_ManifestArchNotInManifest) {
       kpack_load_code_object(cache.get(), metadata.data(), binary_path.c_str(),
                              0, arch_list, 1, &code_object, &size);
 
-  EXPECT_EQ(err, KPACK_ERROR_ARCHIVE_NOT_FOUND);
+  EXPECT_EQ(err, KPACK_ERROR_ARCH_NOT_FOUND);
   EXPECT_EQ(code_object, nullptr);
 }
 
-TEST(LoaderAPITest, LoadCodeObject_ManifestFileNotFound) {
+TEST(LoaderAPITest, LoadCodeObject_ArchiveFileNotFound) {
   std::string assets_dir = get_test_assets_dir();
   if (assets_dir.empty()) {
     GTEST_SKIP() << "ROCM_KPACK_TEST_ASSETS_DIR not set";
@@ -751,8 +748,9 @@ TEST(LoaderAPITest, LoadCodeObject_ManifestFileNotFound) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  // Point to a manifest file that doesn't exist
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"does_not_exist.kpm"});
+  // Point to an archive file that doesn't exist
+  auto metadata =
+      make_hipk_metadata("lib/libtest.so", {"does_not_exist.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   const char* arch_list[] = {"gfx900"};
@@ -785,7 +783,7 @@ TEST(LoaderAPITest, ThreadSafety_ConcurrentLoadCodeObject) {
   CacheGuard cache;
   ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
 
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   constexpr int kNumThreads = 8;
@@ -846,7 +844,7 @@ TEST(LoaderAPITest, ThreadSafety_ConcurrentArchiveCaching) {
 
   // Multiple threads try to load from same archive simultaneously
   // First call should cache, others should reuse
-  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpm"});
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
   std::string binary_path = assets_dir + "/fake_binary.so";
 
   constexpr int kNumThreads = 10;

@@ -9,6 +9,7 @@
 #include <string>
 #include <vector>
 
+#include "isa_target_match.h"
 #include "kpack_internal.h"
 #include "rocm_kpack/kpack.h"
 
@@ -29,22 +30,9 @@ constexpr const char* ENV_KPACK_DEBUG = "ROCM_KPACK_DEBUG";
     }                                              \
   } while (0)
 
-// Target triple prefix to strip: "amdgcn-amd-amdhsa--gfx1201" -> "gfx1201"
-// This matches the transformation done on the pack side from
-// clang-offload-bundler
-constexpr char kTargetTriplePrefix[] = "amdgcn-amd-amdhsa--";
-constexpr size_t kTargetTriplePrefixLen = sizeof(kTargetTriplePrefix) - 1;
-
-// Strip target triple prefix if present
-std::string strip_target_prefix(const char* arch) {
-  if (!arch) return "";
-  std::string s(arch);
-  if (s.size() > kTargetTriplePrefixLen &&
-      s.compare(0, kTargetTriplePrefixLen, kTargetTriplePrefix) == 0) {
-    return s.substr(kTargetTriplePrefixLen);
-  }
-  return s;
-}
+// Re-exported from isa_target_match.h for use in this TU.
+using kpack::for_each_compatible_target;
+using kpack::strip_target_prefix;
 
 // Helper to find key in msgpack map
 msgpack::object* find_key(const msgpack::object_map& map, const char* key) {
@@ -329,16 +317,21 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
       std::string resolved = resolve_path(binary_path, rel_path);
 
       // Check for @GFXARCH@ pattern — expand for each requested architecture
+      // and all compatible feature-flag subsets (most specific first).
       auto placeholder_pos = resolved.find(kGfxArchPlaceholder);
       if (placeholder_pos != std::string::npos) {
         for (size_t i = 0; i < arch_count; ++i) {
           if (!arch_list[i]) continue;
-          std::string base_arch = strip_target_prefix(arch_list[i]);
-          std::string expanded = resolved;
-          expanded.replace(placeholder_pos, kGfxArchPlaceholderLen, base_arch);
-          KPACK_DEBUG(cache, "expanded pattern: %s -> %s", rel_path.c_str(),
-                      expanded.c_str());
-          kpack_paths.push_back(expanded);
+          for_each_compatible_target(
+              arch_list[i], [&](const std::string& target) {
+                std::string expanded = resolved;
+                expanded.replace(placeholder_pos, kGfxArchPlaceholderLen,
+                                 target);
+                KPACK_DEBUG(cache, "expanded pattern: %s -> %s",
+                            rel_path.c_str(), expanded.c_str());
+                kpack_paths.push_back(expanded);
+                return false;  // continue — collect all, check existence later
+              });
         }
       } else {
         // Direct .kpack path
@@ -416,46 +409,47 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
       continue;
     }
 
-    // Strip target triple prefix for archive lookup
-    std::string base_arch = strip_target_prefix(arch);
-    KPACK_DEBUG(cache, "trying architecture: %s (base: %s)", arch,
-                base_arch.c_str());
+    // Try compatible targets (power set of feature flags, most specific first)
+    // to find an archive that has a matching architecture.
+    KPACK_DEBUG(cache, "trying architecture: %s", arch);
 
-    // Find archive containing this architecture
-    // Lock only for cache lookup, release before kernel fetch
     kpack_archive_t archive = nullptr;
+    std::string matched_arch;
+
+    // Find archive containing a compatible architecture
+    // Lock only for cache lookup, release before kernel fetch
     {
       std::lock_guard<std::mutex> lock(cache->archive_mutex);
 
-      for (const auto& archive_path : valid_archive_paths) {
-        // Check if this archive has the architecture (fast lookup)
-        auto arch_it = cache->archive_archs.find(archive_path);
-        if (arch_it == cache->archive_archs.end() ||
-            arch_it->second.count(base_arch) == 0) {
-          continue;
-        }
+      for_each_compatible_target(arch, [&](const std::string& target) {
+        for (const auto& archive_path : valid_archive_paths) {
+          auto arch_it = cache->archive_archs.find(archive_path);
+          if (arch_it == cache->archive_archs.end() ||
+              arch_it->second.count(target) == 0) {
+            continue;
+          }
 
-        KPACK_DEBUG(cache, "  archive %s has architecture",
-                    archive_path.c_str());
+          KPACK_DEBUG(cache, "  archive %s has architecture %s",
+                      archive_path.c_str(), target.c_str());
 
-        // Get the archive handle
-        auto archive_it = cache->archives.find(archive_path);
-        if (archive_it != cache->archives.end()) {
-          archive = archive_it->second;
-          break;
+          auto archive_it = cache->archives.find(archive_path);
+          if (archive_it != cache->archives.end()) {
+            archive = archive_it->second;
+            matched_arch = target;
+            return true;  // found — stop searching
+          }
         }
-      }
+        return false;  // try next compatible target
+      });
     }  // Release cache->archive_mutex before kernel fetch
 
     if (!archive) {
       continue;
     }
 
-    // Fetch kernel - kpack_get_kernel() is thread-safe and allocates result
-    // Use lookup_key which includes the co_index suffix for multi-TU binaries
-    // Use base_arch (stripped) since that's how kernels are stored in the
-    // archive
-    err = kpack_get_kernel(archive, lookup_key.c_str(), base_arch.c_str(),
+    // Fetch kernel using the matched architecture (which may be a subset of
+    // the agent's full ISA, e.g., bare "gfx942" for a release build).
+    err = kpack_get_kernel(archive, lookup_key.c_str(), matched_arch.c_str(),
                            &kernel_data, &kernel_size);
     if (err == KPACK_SUCCESS) {
       KPACK_DEBUG(cache, "  found kernel: %zu bytes", kernel_size);
