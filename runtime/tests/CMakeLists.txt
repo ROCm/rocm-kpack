@@ -8,6 +8,7 @@ add_executable(test_kpack_runtime
     test_utils_test.cpp
     test_archive_integration.cpp
     test_loader_api.cpp
+    test_isa_target_match.cpp
 )
 target_link_libraries(test_kpack_runtime
     PRIVATE
