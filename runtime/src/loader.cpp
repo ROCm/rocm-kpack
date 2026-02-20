@@ -180,115 +180,12 @@ bool file_exists(const std::string& path) {
   }
 }
 
-// Read and parse a .kpm manifest file to get kpack paths for architectures
-// Manifest format:
-// {
-//   "format_version": 1,
-//   "component_name": "...",
-//   "kpack_files": {
-//     "gfx1100": {"file": "name_gfx1100.kpack", ...},
-//     ...
-//   }
-// }
-std::vector<std::string> resolve_manifest(const std::string& manifest_path,
-                                          const char* const* arch_list,
-                                          size_t arch_count,
-                                          kpack_cache* cache) {
-  namespace fs = std::filesystem;
-  std::vector<std::string> result;
-
-  // Read manifest file
-  std::FILE* f = std::fopen(manifest_path.c_str(), "rb");
-  if (!f) {
-    KPACK_DEBUG(cache, "failed to open manifest: %s", manifest_path.c_str());
-    return result;
-  }
-
-  std::fseek(f, 0, SEEK_END);
-  long file_size = std::ftell(f);
-  std::fseek(f, 0, SEEK_SET);
-
-  if (file_size <= 0 || file_size > 1024 * 1024) {  // Max 1MB
-    std::fclose(f);
-    return result;
-  }
-
-  std::vector<char> buffer(file_size);
-  size_t read = std::fread(buffer.data(), 1, file_size, f);
-  std::fclose(f);
-
-  if (read != static_cast<size_t>(file_size)) {
-    return result;
-  }
-
-  // Parse manifest msgpack
-  msgpack::object_handle oh;
-  try {
-    oh = msgpack::unpack(buffer.data(), buffer.size());
-  } catch (...) {
-    KPACK_DEBUG(cache, "failed to parse manifest: %s", manifest_path.c_str());
-    return result;
-  }
-
-  msgpack::object obj = oh.get();
-  if (obj.type != msgpack::type::MAP) {
-    return result;
-  }
-
-  const auto& map = obj.via.map;
-
-  // Get kpack_files map
-  auto* kpack_files = find_key(map, "kpack_files");
-  if (!kpack_files || kpack_files->type != msgpack::type::MAP) {
-    KPACK_DEBUG(cache, "manifest missing kpack_files: %s",
-                manifest_path.c_str());
-    return result;
-  }
-
-  // Get directory containing manifest
-  std::string manifest_dir;
-  try {
-    manifest_dir = fs::path(manifest_path).parent_path().string();
-  } catch (...) {
-    return result;
-  }
-
-  // For each requested architecture, look for matching kpack file
-  const auto& files_map = kpack_files->via.map;
-  for (size_t i = 0; i < arch_count; ++i) {
-    if (!arch_list[i]) continue;
-
-    std::string base_arch = strip_target_prefix(arch_list[i]);
-
-    KPACK_DEBUG(cache, "manifest lookup: %s (base: %s)", arch_list[i],
-                base_arch.c_str());
-
-    // Look for this arch in kpack_files
-    for (size_t j = 0; j < files_map.size; ++j) {
-      const auto& kv = files_map.ptr[j];
-      if (kv.key.type != msgpack::type::STR) continue;
-
-      std::string arch_key(kv.key.via.str.ptr, kv.key.via.str.size);
-      if (arch_key != base_arch) continue;
-
-      // Found architecture, extract file path
-      if (kv.val.type != msgpack::type::MAP) continue;
-
-      const auto& arch_info = kv.val.via.map;
-      auto* file_val = find_key(arch_info, "file");
-      if (!file_val || file_val->type != msgpack::type::STR) continue;
-
-      std::string kpack_file(file_val->via.str.ptr, file_val->via.str.size);
-      std::string full_path = manifest_dir + "/" + kpack_file;
-
-      KPACK_DEBUG(cache, "manifest %s: arch %s -> %s", manifest_path.c_str(),
-                  arch_list[i], full_path.c_str());
-      result.push_back(full_path);
-    }
-  }
-
-  return result;
-}
+// Placeholder token in search paths that gets replaced with the GPU
+// architecture at runtime. The build tools embed paths like:
+//   ../.kpack/foo_@GFXARCH@.kpack
+// and this loader expands @GFXARCH@ for each requested architecture.
+constexpr char kGfxArchPlaceholder[] = "@GFXARCH@";
+constexpr size_t kGfxArchPlaceholderLen = sizeof(kGfxArchPlaceholder) - 1;
 
 // Get canonical path for cache key (exception-safe)
 std::string get_canonical_path(const std::string& path) {
@@ -409,8 +306,8 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
 
   // Build final list of .kpack archive paths.
   // Override/prefix paths are direct .kpack paths.
-  // Embedded paths from HIPK metadata are always manifests (.kpm) that
-  // resolve to .kpack paths based on the requested architectures.
+  // Embedded paths containing @GFXARCH@ are expanded for each requested
+  // architecture. Other embedded paths are used as direct .kpack paths.
   std::vector<std::string> kpack_paths;
 
   if (!cache->env_path_override.empty()) {
@@ -427,19 +324,27 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
                   cache->env_path_prefix.size(), ENV_KPACK_PATH_PREFIX);
     }
 
-    // Resolve embedded paths as manifests -> .kpack paths
+    // Resolve embedded search paths
     for (const auto& rel_path : embedded_search_paths) {
       std::string resolved = resolve_path(binary_path, rel_path);
-      KPACK_DEBUG(cache, "resolving manifest: %s -> %s", rel_path.c_str(),
-                  resolved.c_str());
-      auto resolved_paths =
-          resolve_manifest(resolved, arch_list, arch_count, cache);
-      if (!resolved_paths.empty()) {
-        kpack_paths.insert(kpack_paths.end(), resolved_paths.begin(),
-                           resolved_paths.end());
+
+      // Check for @GFXARCH@ pattern — expand for each requested architecture
+      auto placeholder_pos = resolved.find(kGfxArchPlaceholder);
+      if (placeholder_pos != std::string::npos) {
+        for (size_t i = 0; i < arch_count; ++i) {
+          if (!arch_list[i]) continue;
+          std::string base_arch = strip_target_prefix(arch_list[i]);
+          std::string expanded = resolved;
+          expanded.replace(placeholder_pos, kGfxArchPlaceholderLen, base_arch);
+          KPACK_DEBUG(cache, "expanded pattern: %s -> %s", rel_path.c_str(),
+                      expanded.c_str());
+          kpack_paths.push_back(expanded);
+        }
       } else {
-        KPACK_DEBUG(cache, "manifest resolved to no kpack files: %s",
+        // Direct .kpack path
+        KPACK_DEBUG(cache, "direct path: %s -> %s", rel_path.c_str(),
                     resolved.c_str());
+        kpack_paths.push_back(resolved);
       }
     }
   }

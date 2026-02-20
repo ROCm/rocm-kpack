@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import List, Tuple, Dict, Optional, Set
 from collections import defaultdict
 from dataclasses import dataclass
-import msgpack
 
 from rocm_kpack.artifact_utils import (
     extract_architecture_from_target,
@@ -210,18 +209,20 @@ class ArtifactSplitter:
         self.database_handlers = database_handlers or []
         self.verbose = verbose
 
-    def compute_manifest_relative_path(
-        self, binary_path: Path, prefix_root: Path
-    ) -> str:
+    def compute_kpack_search_pattern(self, binary_path: Path, prefix_root: Path) -> str:
         """
-        Compute the relative path from a binary to its kpack manifest.
+        Compute the @GFXARCH@ search pattern from a binary to its kpack files.
+
+        The pattern uses @GFXARCH@ as a placeholder that the runtime expands
+        with the requested GPU architecture at load time. This eliminates the
+        need for .kpm manifest files that enumerate architectures at build time.
 
         Args:
             binary_path: Path to the binary
             prefix_root: Root of the prefix (where .kpack/ directory will be)
 
         Returns:
-            Relative path from binary to .kpack/{artifact_prefix}.kpm
+            Relative path pattern like .kpack/{artifact_prefix}_@GFXARCH@.kpack
         """
         # Get the relative path from prefix root to binary
         rel_path = binary_path.relative_to(prefix_root)
@@ -229,20 +230,21 @@ class ArtifactSplitter:
         # Count directory levels (excluding the binary file itself)
         depth = len(rel_path.parts) - 1
 
-        # Build the relative path to .kpack directory
+        # Build the relative path to .kpack directory with @GFXARCH@ pattern
+        kpack_pattern = f".kpack/{self.artifact_prefix}_@GFXARCH@.kpack"
         if depth == 0:
             # Binary is at prefix root
-            manifest_path = f".kpack/{self.artifact_prefix}.kpm"
+            search_pattern = kpack_pattern
         else:
             # Binary is in subdirectories
             up_path = "/".join([".."] * depth)
-            manifest_path = f"{up_path}/.kpack/{self.artifact_prefix}.kpm"
+            search_pattern = f"{up_path}/{kpack_pattern}"
 
         if self.verbose:
             print(f"  Binary at: {rel_path}")
-            print(f"  Manifest path: {manifest_path}")
+            print(f"  Search pattern: {search_pattern}")
 
-        return manifest_path
+        return search_pattern
 
     def scan_prefix(
         self, prefix_path: Path, visitor: FileClassificationVisitor
@@ -489,7 +491,11 @@ class ArtifactSplitter:
         kpack_info_by_arch: Dict[str, KpackInfo],
     ):
         """
-        Inject kpack manifest references into fat binaries and strip device code.
+        Inject kpack search patterns into fat binaries and strip device code.
+
+        Embeds @GFXARCH@ patterns in each binary's .rocm_kpack_ref section.
+        The runtime expands @GFXARCH@ with the requested GPU architecture at
+        load time, eliminating the need for .kpm manifest files.
 
         Args:
             fat_binaries_by_prefix: Dictionary mapping prefix to list of fat binary paths
@@ -497,58 +503,15 @@ class ArtifactSplitter:
             kpack_info_by_arch: Dict mapping arch to KpackInfo
         """
         if self.verbose:
-            print("\nInjecting kpack manifest references and stripping device code")
+            print("\nInjecting kpack search patterns and stripping device code")
 
         for prefix, binary_paths in fat_binaries_by_prefix.items():
             prefix_dir = generic_artifact_dir / prefix
 
-            # Create .kpack directory in the generic artifact prefix
-            kpack_dir = prefix_dir / ".kpack"
-            kpack_dir.mkdir(parents=True, exist_ok=True)
-
-            # Create the manifest file that lists available kpack files
-            manifest_path = kpack_dir / f"{self.artifact_prefix}.kpm"
-
-            # Build manifest data according to design doc format
-            manifest_data = {
-                "format_version": 1,
-                "component_name": self.artifact_prefix,
-                "prefix": prefix,  # The prefix this manifest belongs to
-                "kpack_files": {},
-            }
-
-            # Add entries for each architecture with size and kernel count info
-            for arch in sorted(kpack_info_by_arch.keys()):
-                kpack_info = kpack_info_by_arch[arch]
-                kpack_filename = (
-                    kpack_info.kpack_path.name
-                )  # Just the filename, not full path
-
-                manifest_data["kpack_files"][arch] = {
-                    "file": kpack_filename,
-                    "size": kpack_info.size,
-                    "kernel_count": kpack_info.kernel_count,
-                }
-
-            # Write the manifest
-            with open(manifest_path, "wb") as f:
-                msgpack.pack(manifest_data, f)
-
-            # Validate manifest was created
-            if not manifest_path.exists():
-                raise RuntimeError(f"Failed to create manifest file: {manifest_path}")
-            if manifest_path.stat().st_size == 0:
-                raise RuntimeError(f"Manifest file is empty: {manifest_path}")
-
-            if self.verbose:
-                print(
-                    f"  Created manifest: {manifest_path.relative_to(generic_artifact_dir)}"
-                )
-
-            # Now inject references to this manifest in each binary
+            # Inject kpack search pattern in each binary
             for binary_path in binary_paths:
-                # Compute relative path from binary to the manifest using existing method
-                manifest_relpath = self.compute_manifest_relative_path(
+                # Compute @GFXARCH@ search pattern from binary to .kpack directory
+                search_pattern = self.compute_kpack_search_pattern(
                     binary_path, prefix_dir
                 )
 
@@ -556,7 +519,7 @@ class ArtifactSplitter:
                     print(
                         f"  Processing {binary_path.relative_to(generic_artifact_dir)}"
                     )
-                    print(f"    Manifest path: {manifest_relpath}")
+                    print(f"    Search pattern: {search_pattern}")
 
                 # Create temporary output file
                 temp_output = binary_path.with_suffix(binary_path.suffix + ".kpacked")
@@ -571,12 +534,12 @@ class ArtifactSplitter:
                     binary_relpath = binary_path.relative_to(prefix_dir)
                     kernel_name = f"{prefix}/{binary_relpath}"
 
-                    # Add manifest reference marker and transform binary in one pass
+                    # Add kpack search pattern and transform binary in one pass
                     # (adds .rocm_kpack_ref, maps to PT_LOAD, rewrites magic, zero-pages .hip_fatbin)
                     kpack_offload_binary(
                         input_path=binary_path,
                         output_path=temp_output,
-                        kpack_search_paths=[manifest_relpath],  # Manifest path
+                        kpack_search_paths=[search_pattern],
                         kernel_name=kernel_name,
                         verbose=self.verbose,
                     )

@@ -4,13 +4,11 @@ import json
 import shutil
 from pathlib import Path
 
-import msgpack
 import pytest
 
 from rocm_kpack.artifact_collector import ArtifactCollector
 from rocm_kpack.artifact_combiner import ArtifactCombiner
 from rocm_kpack.artifact_utils import write_artifact_manifest
-from rocm_kpack.manifest_merger import ManifestMerger
 from rocm_kpack.packaging_config import PackagingConfig
 
 
@@ -54,10 +52,6 @@ class TestRecombineIntegration:
                     f"Mock library content from {shard_name}"
                 )
 
-                # Create .kpack directory for manifests
-                kpack_dir = prefix_dir / ".kpack"
-                kpack_dir.mkdir()
-
                 # Create architecture-specific artifacts for this shard
                 for arch in architectures:
                     arch_dir = shard_dir / f"{component_name}_{arch}"
@@ -75,26 +69,6 @@ class TestRecombineIntegration:
                     kpack_file.write_text(
                         f"Mock kpack data for {arch} from {shard_name}"
                     )
-
-                    # Create mock manifest for this architecture
-                    manifest_data = {
-                        "format_version": 1,
-                        "component_name": component_name,
-                        "prefix": prefix,
-                        "kpack_files": {
-                            arch: {
-                                "file": f"{component_name}_{arch}.kpack",
-                                "size": len(
-                                    f"Mock kpack data for {arch} from {shard_name}"
-                                ),
-                                "kernel_count": 5,
-                            }
-                        },
-                    }
-
-                    manifest_path = arch_kpack_dir / f"{component_name}.kpm"
-                    with open(manifest_path, "wb") as f:
-                        msgpack.pack(manifest_data, f)
 
                     # Create mock database file (architecture-specific)
                     db_dir = arch_prefix_dir / "lib" / "rocblas" / "library"
@@ -178,8 +152,7 @@ class TestRecombineIntegration:
         collector.collect()
 
         # Create combiner
-        manifest_merger = ManifestMerger(verbose=False)
-        combiner = ArtifactCombiner(collector, manifest_merger, verbose=False)
+        combiner = ArtifactCombiner(collector, verbose=False)
 
         # Recombine
         output_dir = tmp_path / "output"
@@ -230,20 +203,11 @@ class TestRecombineIntegration:
             kpack_file = arch_kpack_dir / f"test_lib_{arch}.kpack"
             assert kpack_file.exists(), f"Missing kpack file for {arch}"
 
-        # Verify arch artifact has .kpm manifest
-        kpm_manifest = arch_kpack_dir / "test_lib.kpm"
-        assert kpm_manifest.exists(), "Missing .kpm manifest in arch artifact"
-
-        # Read and verify manifest
-        with open(kpm_manifest, "rb") as f:
-            manifest_data = msgpack.unpack(f, raw=False)
-
-        assert manifest_data["format_version"] == 1
-        assert manifest_data["component_name"] == "test_lib"
-        assert len(manifest_data["kpack_files"]) == 3
-        assert "gfx1100" in manifest_data["kpack_files"]
-        assert "gfx1101" in manifest_data["kpack_files"]
-        assert "gfx1102" in manifest_data["kpack_files"]
+        # Verify NO .kpm manifest (patterns replace manifests)
+        kpm_files = list(arch_kpack_dir.glob("*.kpm"))
+        assert (
+            len(kpm_files) == 0
+        ), f"No .kpm manifests should exist, found: {kpm_files}"
 
         # Verify architecture-specific database files in arch artifact
         for arch in ["gfx1100", "gfx1101", "gfx1102"]:
@@ -268,8 +232,7 @@ class TestRecombineIntegration:
         )
         collector.collect()
 
-        manifest_merger = ManifestMerger(verbose=False)
-        combiner = ArtifactCombiner(collector, manifest_merger, verbose=False)
+        combiner = ArtifactCombiner(collector, verbose=False)
 
         output_dir = tmp_path / "output"
         output_dir.mkdir()
@@ -287,15 +250,10 @@ class TestRecombineIntegration:
         kpack_files = list(kpack_dir.glob("*.kpack"))
         assert len(kpack_files) == 2
 
-        # Verify manifest has only 2 architectures
-        manifest = kpack_dir / "test_lib.kpm"
-        with open(manifest, "rb") as f:
-            manifest_data = msgpack.unpack(f, raw=False)
-
-        assert len(manifest_data["kpack_files"]) == 2
-        assert "gfx1100" in manifest_data["kpack_files"]
-        assert "gfx1101" in manifest_data["kpack_files"]
-        assert "gfx1102" not in manifest_data["kpack_files"]
+        # Verify the correct architectures have kpack files
+        kpack_names = {f.stem for f in kpack_files}
+        assert "test_lib_gfx1100" in kpack_names
+        assert "test_lib_gfx1101" in kpack_names
 
     def test_generic_artifact_created_once(self, tmp_path, create_split_artifacts):
         """Test that generic artifact is created only once across multiple architecture groups."""
@@ -333,8 +291,7 @@ class TestRecombineIntegration:
         collector = ArtifactCollector(shards_dir, config.primary_shard, verbose=False)
         collector.collect()
 
-        manifest_merger = ManifestMerger(verbose=False)
-        combiner = ArtifactCombiner(collector, manifest_merger, verbose=False)
+        combiner = ArtifactCombiner(collector, verbose=False)
 
         output_dir = tmp_path / "output"
         output_dir.mkdir()
@@ -400,8 +357,7 @@ class TestRecombineIntegration:
         collector.collect()
 
         # Create combiner
-        manifest_merger = ManifestMerger(verbose=False)
-        combiner = ArtifactCombiner(collector, manifest_merger, verbose=False)
+        combiner = ArtifactCombiner(collector, verbose=False)
 
         # Recombine
         output_dir = tmp_path / "output"

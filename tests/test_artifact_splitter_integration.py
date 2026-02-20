@@ -9,7 +9,6 @@ from argparse import Namespace
 from pathlib import Path
 
 import pytest
-import msgpack
 
 from rocm_kpack.artifact_splitter import (
     ArtifactSplitter,
@@ -181,28 +180,15 @@ class TestArtifactSplitterIntegration:
                 len(kpack_files) == 1
             ), f"Should have one kpack file in {arch_artifact}/{prefix}/.kpack/"
 
-        # Check the manifest was created in generic artifact
-        manifest_file = generic_dir / prefix / ".kpack" / "test_lib.kpm"
-        assert manifest_file.exists(), "Manifest file should exist in generic artifact"
-
-        # Verify manifest content
-        with open(manifest_file, "rb") as f:
-            manifest_data = msgpack.unpack(f)
-
-        assert manifest_data["format_version"] == 1
-        assert manifest_data["component_name"] == "test_lib"
-        assert manifest_data["prefix"] == prefix
+        # Verify no .kpm manifest was created (patterns replace manifests)
+        kpm_files = (
+            list((generic_dir / prefix / ".kpack").glob("*.kpm"))
+            if (generic_dir / prefix / ".kpack").exists()
+            else []
+        )
         assert (
-            len(manifest_data["kpack_files"]) >= 1
-        ), "Should have at least one architecture in manifest"
-
-        # Check each architecture entry has required fields
-        for arch, info in manifest_data["kpack_files"].items():
-            assert "file" in info
-            assert "size" in info
-            assert "kernel_count" in info
-            assert info["size"] > 0
-            assert info["kernel_count"] > 0
+            len(kpm_files) == 0
+        ), f"No .kpm manifest files should exist, found: {kpm_files}"
 
         # Verify device code was stripped from fat binary in generic artifact
         original_size = fat_binary_src.stat().st_size
@@ -722,25 +708,16 @@ class TestArtifactSplitterIntegration:
         for arch_artifact in arch_artifacts:
             shutil.copytree(arch_artifact, overlay_dir, dirs_exist_ok=True)
 
-        # Verify .kpack directory has both .kpm and .kpack files
+        # Verify .kpack directory has .kpack files (no .kpm manifests)
         kpack_dir = overlay_dir / prefix / ".kpack"
         assert kpack_dir.exists(), ".kpack directory should exist after overlay"
 
-        kpm_files = list(kpack_dir.glob("*.kpm"))
         kpack_files = list(kpack_dir.glob("*.kpack"))
+        kpm_files = list(kpack_dir.glob("*.kpm"))
 
-        assert (
-            len(kpm_files) == 1
-        ), f"Should have exactly one .kpm manifest file, got {kpm_files}"
         assert (
             len(kpack_files) >= 1
         ), f"Should have at least one .kpack kernel file, got {kpack_files}"
-
-        # Verify the manifest references the kpack files
-        manifest_path = kpm_files[0]
-        with open(manifest_path, "rb") as f:
-            manifest_data = msgpack.unpack(f)
-
-        # Manifest should list the architectures
-        assert "kpack_files" in manifest_data
-        assert len(manifest_data["kpack_files"]) >= 1
+        assert (
+            len(kpm_files) == 0
+        ), f"Should have no .kpm manifest files (patterns replace manifests), got {kpm_files}"
