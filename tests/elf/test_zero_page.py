@@ -259,6 +259,97 @@ class TestFullPipelineAlignment:
         assert min_offset > 0, "get_min_content_offset should not return 0"
 
 
+class TestNobitsCollision:
+    """Tests for NOBITS offset collision when section ends on page boundary."""
+
+    def test_page_aligned_section_end_no_collision(
+        self, test_assets_dir: Path, tmp_path: Path
+    ):
+        """Verify no NOBITS collision when .hip_fatbin ends on a page boundary.
+
+        When .hip_fatbin's vaddr + size is page-aligned (suffix == 0), the
+        NOBITS piece and post-section piece would share the same file offset
+        after byte removal. The fix gives NOBITS segments a safe offset past
+        end of file.
+
+        Reproduces the CI failure on test_rocrand_scrambled_sobol32_qrng
+        (gfx1151) where .hip_fatbin was at vaddr=0x2e000, size=0x12000,
+        end=0x40000 (page-aligned).
+        """
+        from elf_test_utils import patch_hip_fatbin_size
+
+        source = test_assets_dir / "bundled_binaries/linux/cov5/test_kernel_single.exe"
+        # Test binary: .hip_fatbin at vaddr=0x1000, original size=0x2d30.
+        # Patch to 0x2000 so end = 0x1000 + 0x2000 = 0x3000 (page-aligned).
+        patched = patch_hip_fatbin_size(source, tmp_path / "page_aligned.exe", 0x2000)
+
+        surgery = ElfSurgery.load(patched)
+        result = conservative_zero_page(surgery)
+        assert result.success
+        assert result.bytes_saved > 0
+
+        # The key check: verifier must pass (no NOBITS collision)
+        verify_result = ElfVerifier.verify_data(surgery.data)
+        assert verify_result.passed, (
+            f"NOBITS collision after zero-paging page-aligned section: "
+            f"{verify_result.errors}"
+        )
+
+    def test_page_aligned_section_end_full_pipeline(
+        self, test_assets_dir: Path, tmp_path: Path
+    ):
+        """Full kpack pipeline with page-aligned .hip_fatbin end."""
+        from elf_test_utils import patch_hip_fatbin_size
+
+        source = test_assets_dir / "bundled_binaries/linux/cov5/test_kernel_single.exe"
+        patched = patch_hip_fatbin_size(source, tmp_path / "page_aligned.exe", 0x2000)
+        output = tmp_path / "kpacked_output.exe"
+
+        result = kpack_offload_binary(
+            input_path=patched,
+            output_path=output,
+            kpack_search_paths=["test.kpack"],
+            kernel_name="test_kernel",
+        )
+
+        assert output.exists()
+        assert result["new_size"] > 0
+
+        # Verify output passes all checks
+        surgery = ElfSurgery.load(output)
+        assert_load_alignment(surgery, "page-aligned .hip_fatbin end")
+        verify_result = ElfVerifier.verify_data(surgery.data)
+        assert verify_result.passed, f"Verification errors: {verify_result.errors}"
+
+    def test_leaves_one_page_when_suffix_zero(
+        self, test_assets_dir: Path, tmp_path: Path
+    ):
+        """Verify that when suffix==0, one page is left behind to avoid collision.
+
+        The fix shrinks aligned_size by PAGE_SIZE so the last page remains
+        as file content. This means we save one fewer page, but the NOBITS
+        and post-section pieces have distinct file offsets.
+        """
+        from elf_test_utils import patch_hip_fatbin_size
+
+        source = test_assets_dir / "bundled_binaries/linux/cov5/test_kernel_single.exe"
+        # .hip_fatbin at vaddr=0x1000, patched to 0x2000 → end=0x3000 (page-aligned)
+        # Section spans 2 pages. With suffix==0 fix, only 1 page is removed.
+        patched = patch_hip_fatbin_size(source, tmp_path / "page_aligned.exe", 0x2000)
+
+        surgery = ElfSurgery.load(patched)
+        original_size = len(surgery.data)
+
+        result = conservative_zero_page(surgery)
+        assert result.success
+        assert (
+            result.pages_zeroed == 1
+        ), f"Expected 1 page zeroed (2 pages minus 1 kept), got {result.pages_zeroed}"
+        assert (
+            result.bytes_saved == PAGE_SIZE
+        ), f"Expected {PAGE_SIZE} bytes saved (one page), got {result.bytes_saved}"
+
+
 class TestSteppedPipelineAlignment:
     """Tests that step through the pipeline manually to verify each phase."""
 

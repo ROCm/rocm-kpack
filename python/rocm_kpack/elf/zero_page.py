@@ -242,6 +242,25 @@ def conservative_zero_page(
             error="Section too small or misaligned - no full pages to zero",
         )
 
+    # When the section ends exactly on a page boundary (suffix==0), removing
+    # ALL aligned content causes a NOBITS collision: the NOBITS segment and
+    # the post-section segment would share the same file offset. Fix: leave
+    # one page of content behind so the post-section piece starts one page
+    # higher. Cost: one fewer page of savings (4KB), but the ELF structure
+    # is completely standard with no synthetic offsets.
+    section_end = section_vaddr + section_size
+    suffix = section_end - round_down_to_page(section_end)
+    if suffix == 0:
+        aligned_size -= PAGE_SIZE
+        if aligned_size == 0:
+            return ZeroPageResult(
+                success=True,
+                bytes_saved=0,
+                phdr_relocated=False,
+                pages_zeroed=0,
+                error="Section page-aligned end with only one page - skipping to avoid NOBITS collision",
+            )
+
     aligned_offset = section_offset + (aligned_vaddr - section_vaddr)
     pages_to_zero = aligned_size // PAGE_SIZE
 
@@ -314,18 +333,11 @@ def conservative_zero_page(
         else:
             # Replace target with split pieces
             for piece in pieces:
-                # Calculate adjusted offset for pieces after removal point
-                adjusted_offset = piece.offset
-                if piece.offset >= aligned_offset and not piece.is_nobits:
-                    # This piece was originally after the removed region
-                    # but piece.offset already accounts for removal in split logic
-                    pass
-
                 # Create PT_LOAD for this piece
                 new_phdr = ProgramHeader(
                     p_type=PT_LOAD,
                     p_flags=target_load.p_flags,
-                    p_offset=piece.offset if piece.is_nobits else piece.offset,
+                    p_offset=piece.offset,
                     p_vaddr=piece.vaddr,
                     p_paddr=piece.vaddr,
                     p_filesz=piece.filesz,
