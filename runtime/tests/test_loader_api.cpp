@@ -739,6 +739,33 @@ TEST(LoaderAPITest, LoadCodeObject_ArchNotInArchive) {
   EXPECT_EQ(code_object, nullptr);
 }
 
+TEST(LoaderAPITest, LoadCodeObject_KernelNotFound) {
+  std::string assets_dir = get_test_assets_dir();
+  if (assets_dir.empty()) {
+    GTEST_SKIP() << "ROCM_KPACK_TEST_ASSETS_DIR not set";
+  }
+
+  CacheGuard cache;
+  ASSERT_EQ(kpack_cache_create(cache.ptr()), KPACK_SUCCESS);
+
+  // test_noop.kpack contains gfx900, and the kernel "lib/libtest.so#0".
+  // Request co_index=999 — the archive will be found and the architecture
+  // will match, but "lib/libtest.so#999" is not in the TOC.
+  auto metadata = make_hipk_metadata("lib/libtest.so", {"test_noop.kpack"});
+  std::string binary_path = assets_dir + "/fake_binary.so";
+
+  const char* arch_list[] = {"gfx900"};
+  void* code_object = nullptr;
+  size_t size = 0;
+
+  kpack_error_t err =
+      kpack_load_code_object(cache.get(), metadata.data(), binary_path.c_str(),
+                             999, arch_list, 1, &code_object, &size);
+
+  EXPECT_EQ(err, KPACK_ERROR_KERNEL_NOT_FOUND);
+  EXPECT_EQ(code_object, nullptr);
+}
+
 TEST(LoaderAPITest, LoadCodeObject_ArchiveFileNotFound) {
   std::string assets_dir = get_test_assets_dir();
   if (assets_dir.empty()) {
