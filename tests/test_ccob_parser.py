@@ -1,16 +1,20 @@
 """Tests for CCOB parser module."""
 
+import struct
 import subprocess
 from pathlib import Path
 
 import pytest
+import zstandard as zstd
 
 from rocm_kpack.ccob_parser import (
     CCOBHeader,
     UncompressedBundle,
     decompress_ccob,
+    extract_code_objects_from_fatbin,
     list_ccob_targets,
     parse_ccob_file,
+    parse_fatbin_data,
 )
 
 
@@ -156,3 +160,140 @@ def test_uncompressed_bundle_get_code_object():
 
     # Try non-existent triple
     assert bundle.get_code_object("nonexistent") is None
+
+
+# ---------------------------------------------------------------------------
+# Helpers for building synthetic CCOB bundles
+# ---------------------------------------------------------------------------
+
+
+def _make_uncompressed_bundle(entries: list[tuple[str, bytes]]) -> bytes:
+    """Build an uncompressed offload bundle from (triple, data) pairs."""
+    magic = b"__CLANG_OFFLOAD_BUNDLE__"
+    num_entries = struct.pack("<Q", len(entries))
+
+    # Compute header size to know where code objects start
+    header_size = 24 + 8  # magic + num_entries
+    for triple, _ in entries:
+        header_size += 8 + 8 + 8 + len(triple)  # offset + size + triple_len + triple
+
+    # Build entry descriptors and concatenate code object data
+    descriptors = b""
+    code_blobs = b""
+    for triple, data in entries:
+        offset = header_size + len(code_blobs)
+        descriptors += struct.pack("<QQQ", offset, len(data), len(triple))
+        descriptors += triple.encode("ascii")
+        code_blobs += data
+
+    return magic + num_entries + descriptors + code_blobs
+
+
+def _make_ccob(bundle_data: bytes) -> bytes:
+    """Wrap an uncompressed bundle in a CCOB compressed envelope."""
+    cctx = zstd.ZstdCompressor()
+    compressed = cctx.compress(bundle_data)
+
+    # CCOB v3 header: 4B magic + 2B version + 2B method + 8B totalSize + 8B uncompSize + 8B hash
+    header_size = 32
+    total_size = header_size + len(compressed)
+    header = (
+        b"CCOB"
+        + struct.pack("<HH", 3, 1)  # version=3, method=1 (zstd)
+        + struct.pack("<Q", total_size)
+        + struct.pack("<Q", len(bundle_data))
+        + struct.pack("<Q", 0)  # hash (unused for decompression)
+    )
+    return header + compressed
+
+
+# ---------------------------------------------------------------------------
+# Multi-CCOB tests
+# ---------------------------------------------------------------------------
+
+
+def test_parse_fatbin_data_single_ccob():
+    """Single CCOB round-trips correctly."""
+    bundle_bytes = _make_uncompressed_bundle(
+        [
+            ("host-x86_64-unknown-linux-gnu-", b""),
+            ("hipv4-amdgcn-amd-amdhsa--gfx942", b"CODE_OBJ_A"),
+        ]
+    )
+    ccob = _make_ccob(bundle_bytes)
+
+    bundles = parse_fatbin_data(ccob)
+    assert len(bundles) == 1
+    assert bundles[0].num_entries == 2
+
+
+def test_parse_fatbin_data_multiple_ccobs():
+    """Multiple back-to-back CCOBs are all extracted.
+
+    Matches the layout produced by the linker for multi-TU HIP binaries.
+    Verifies the fix for the bug where only the first CCOB was parsed.
+    See: llvm/lib/Object/OffloadBundle.cpp:33-99 (extractOffloadBundle)
+    """
+    bundle_a = _make_uncompressed_bundle(
+        [
+            ("host-x86_64-unknown-linux-gnu-", b""),
+            ("hipv4-amdgcn-amd-amdhsa--gfx942", b"KERNEL_A"),
+        ]
+    )
+    bundle_b = _make_uncompressed_bundle(
+        [
+            ("host-x86_64-unknown-linux-gnu-", b""),
+            ("hipv4-amdgcn-amd-amdhsa--gfx942", b"KERNEL_B"),
+        ]
+    )
+    bundle_c = _make_uncompressed_bundle(
+        [
+            ("host-x86_64-unknown-linux-gnu-", b""),
+            ("hipv4-amdgcn-amd-amdhsa--gfx942", b"KERNEL_C"),
+        ]
+    )
+
+    fatbin = _make_ccob(bundle_a) + _make_ccob(bundle_b) + _make_ccob(bundle_c)
+
+    bundles = parse_fatbin_data(fatbin)
+    assert len(bundles) == 3
+
+    # Verify we can extract each code object
+    objs = extract_code_objects_from_fatbin(fatbin)
+    assert len(objs) == 3
+    assert objs[0].data == b"KERNEL_A"
+    assert objs[1].data == b"KERNEL_B"
+    assert objs[2].data == b"KERNEL_C"
+
+
+def test_parse_fatbin_data_ccobs_with_padding():
+    """CCOBs separated by page-alignment padding (zeros).
+
+    Real linker output page-aligns each CCOB. The parser must skip padding
+    bytes between entries, matching LLVM's magic-scanning approach.
+    """
+    ccob_a = _make_ccob(
+        _make_uncompressed_bundle([("hipv4-amdgcn-amd-amdhsa--gfx942", b"A" * 100)])
+    )
+    ccob_b = _make_ccob(
+        _make_uncompressed_bundle([("hipv4-amdgcn-amd-amdhsa--gfx942", b"B" * 100)])
+    )
+
+    # Pad first CCOB to next 4096-byte boundary
+    padded_size = ((len(ccob_a) + 4095) // 4096) * 4096
+    padding = b"\x00" * (padded_size - len(ccob_a))
+    fatbin = ccob_a + padding + ccob_b
+
+    objs = extract_code_objects_from_fatbin(fatbin)
+    assert len(objs) == 2
+    assert objs[0].data == b"A" * 100
+    assert objs[1].data == b"B" * 100
+
+
+def test_parse_fatbin_data_empty_raises():
+    """Empty or unrecognized data raises ValueError."""
+    with pytest.raises(ValueError, match="Unrecognized fatbin format"):
+        parse_fatbin_data(b"")
+
+    with pytest.raises(ValueError, match="Unrecognized fatbin format"):
+        parse_fatbin_data(b"\x00" * 100)

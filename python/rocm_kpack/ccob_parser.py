@@ -513,6 +513,7 @@ def extract_code_objects_by_target(
 # - CCOB-compressed bundles (start with "CCOB" magic)
 # - Single uncompressed bundles (__CLANG_OFFLOAD_BUNDLE__)
 # - Concatenated uncompressed bundles (multiple __CLANG_OFFLOAD_BUNDLE__)
+# - Mixed: multiple CCOBs back-to-back (multi-TU binaries)
 
 CCOB_MAGIC = b"CCOB"
 
@@ -520,8 +521,15 @@ CCOB_MAGIC = b"CCOB"
 def parse_fatbin_data(data: bytes) -> list[UncompressedBundle]:
     """Parse fatbin data in any supported format.
 
-    Handles CCOB-compressed bundles, single uncompressed bundles, and
-    concatenated uncompressed bundles (RDC case).
+    A .hip_fatbin section can contain multiple back-to-back bundles, each
+    independently compressed (CCOB) or uncompressed. This loop matches the
+    iteration strategy in LLVM's extractOffloadBundle():
+
+        llvm/lib/Object/OffloadBundle.cpp:33-99
+
+    The LLVM code scans for magic strings ("CCOB" or
+    "__CLANG_OFFLOAD_BUNDLE__") to find bundle boundaries, advancing past
+    each bundle to find the next. We replicate that here.
 
     Args:
         data: Raw fatbin data bytes
@@ -532,14 +540,47 @@ def parse_fatbin_data(data: bytes) -> list[UncompressedBundle]:
     Raises:
         ValueError: If data format is not recognized
     """
-    if data[:4] == CCOB_MAGIC:
-        decompressed = decompress_ccob(data)
-        return parse_concatenated_bundles(decompressed)
+    bundles: list[UncompressedBundle] = []
+    offset = 0
 
-    if UNCOMPRESSED_BUNDLE_MAGIC in data:
-        return parse_concatenated_bundles(data)
+    while offset < len(data):
+        remaining = data[offset:]
 
-    raise ValueError(f"Unrecognized fatbin format: first 4 bytes are {data[:4]!r}")
+        if remaining[:4] == CCOB_MAGIC:
+            # Compressed bundle. Use the totalSize field from the CCOB
+            # header to determine boundaries — this is more precise than
+            # magic scanning since compressed data can contain false
+            # positives. LLVM's extractOffloadBundle() scans for magic
+            # but doesn't parse the header in the outer loop; we can do
+            # better since decompress_ccob() already reads totalSize.
+            header = CCOBHeader.parse(remaining)
+            decompressed = decompress_ccob(remaining)
+            bundles.extend(parse_concatenated_bundles(decompressed))
+            offset += header.total_size
+
+        elif remaining[:24] == UNCOMPRESSED_BUNDLE_MAGIC:
+            # Uncompressed bundle. Find next magic of either type.
+            # Matches LLVM: both CCOB and uncompressed can be interleaved.
+            next_uncompressed = remaining.find(UNCOMPRESSED_BUNDLE_MAGIC, 24)
+            next_ccob = remaining.find(CCOB_MAGIC, 24)
+
+            candidates = [c for c in [next_uncompressed, next_ccob] if c != -1]
+            if candidates:
+                chunk = remaining[: min(candidates)]
+            else:
+                chunk = remaining
+
+            bundles.extend(parse_concatenated_bundles(chunk))
+            offset += len(chunk)
+
+        else:
+            # Skip padding between page-aligned bundles.
+            offset += 1
+
+    if not bundles:
+        raise ValueError(f"Unrecognized fatbin format: first 4 bytes are {data[:4]!r}")
+
+    return bundles
 
 
 def extract_code_objects_from_fatbin(data: bytes) -> list[ExtractedCodeObject]:
