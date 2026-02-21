@@ -455,16 +455,15 @@ kpack_error_t kpack_load_code_object(kpack_cache_t cache,
       KPACK_DEBUG(cache, "  found kernel: %zu bytes", kernel_size);
       break;
     }
-    if (err != KPACK_ERROR_KERNEL_NOT_FOUND) {
-      // Unexpected error
-      KPACK_DEBUG(cache, "  error getting kernel: %d", err);
-      return err;
-    }
-    KPACK_DEBUG(cache, "  kernel not found in this archive");
+    // Archive was found with matching architecture — the kernel either
+    // exists or it doesn't. Trying a different ISA won't help, so return
+    // the error directly (KERNEL_NOT_FOUND or unexpected error).
+    KPACK_DEBUG(cache, "  kernel not found in this archive (error %d)", err);
+    return err;
   }
 
   if (!kernel_data) {
-    KPACK_DEBUG(cache, "no matching architecture found in any archive");
+    KPACK_DEBUG(cache, "no archive with compatible architecture found");
     return KPACK_ERROR_ARCH_NOT_FOUND;
   }
 
