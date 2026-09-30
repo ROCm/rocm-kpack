@@ -1,5 +1,8 @@
 # rocm-kpack
 
+> [!CAUTION]
+> The rocm-kpack repository is retired, please use [shared/kpack](https://github.com/ROCm/rocm-systems/tree/develop/shared/kpack) in the [ROCm/rocm-systems](https://github.com/ROCm/rocm-systems) repository now.
+
 Kernel packing tool and runtime library for managing ROCm device code distribution.
 
 ## Overview
